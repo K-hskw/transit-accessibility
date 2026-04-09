@@ -1,0 +1,2 @@
+﻿feed_publisher_name,feed_publisher_url,feed_contact_url,feed_contact_email,feed_lang,feed_start_date,feed_end_date,feed_version
+道南バス株式会社,https://www.donanbus.co.jp/,https://www.donanbus.co.jp/,sonosujiya@gmail.com,ja,20260401,20260930,20260401_2026年04月01日（改正） その筋屋 2.019 ●ODPT基本ライセンス(https://developer.odpt.org/terms/data_basic_license.html)

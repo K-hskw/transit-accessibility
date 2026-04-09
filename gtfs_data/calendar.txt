@@ -1,0 +1,4 @@
+﻿service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+1-平日など,1,1,1,1,1,0,0,20260401,20260930
+土曜,0,0,0,0,0,1,0,20260401,20260930
+3-日祝など,0,0,0,0,0,0,1,20260401,20260930
