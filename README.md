@@ -196,6 +196,5 @@ streamlit run app.py
 
 ## 開発者
 
-細川 懐生（Kaina Hosokawa）
-室蘭工業大学 大学院工学研究科 環境創生工学専攻
+MuIT_K-hskw
 専門：交通学・人流解析
