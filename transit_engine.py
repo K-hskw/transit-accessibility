@@ -197,7 +197,10 @@ class TransitEngine:
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
     def simulate_route_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_route_id, track_path=False):
-        edges_after = self.bus_edges[self.bus_edges["route_id"] != remove_route_id]
+        if isinstance(remove_route_id, list):
+            edges_after = self.bus_edges[~self.bus_edges["route_id"].isin(remove_route_id)]
+        else:
+            edges_after = self.bus_edges[self.bus_edges["route_id"] != remove_route_id]
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._build_walk_graph(self.walk_edges)
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
