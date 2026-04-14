@@ -1,38 +1,136 @@
 import streamlit as st
+import pandas as pd
 import folium
+import os
+import zipfile
+import tempfile
+import shutil
+from streamlit_folium import st_folium
+from transit_engine import TransitEngine
 from population import PopulationData, FacilityData
-from streamlit_folium import st_folium
-from transit_engine import TransitEngine
-import streamlit as st
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
-from transit_engine import TransitEngine
-import streamlit as st
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
-from transit_engine import TransitEngine
+from build_network import build_network
 
 st.set_page_config(page_title="公共交通アクセシビリティ分析", layout="wide")
 st.title("公共交通アクセシビリティ分析ツール")
-st.caption("室蘭市 道南バス GTFSデータに基づくシミュレーション")
 
+# ===== データ管理 =====
+DATA_DIR = "."
+GTFS_DIR = os.path.join(DATA_DIR, "gtfs_data")
+
+# セッション状態の初期化
+if "data_source" not in st.session_state:
+    st.session_state.data_source = "default"
+if "engine" not in st.session_state:
+    st.session_state.engine = None
+if "pop_data" not in st.session_state:
+    st.session_state.pop_data = None
+if "facility_data" not in st.session_state:
+    st.session_state.facility_data = None
+
+# --- デフォルトデータの読み込み ---
 @st.cache_resource
 def load_engine():
     return TransitEngine()
 
 @st.cache_resource
 def load_population():
-    return PopulationData("100m_mesh_pop2020_01205室蘭市.csv")
+    if os.path.exists("100m_mesh_pop2020_01205室蘭市.csv"):
+        return PopulationData("100m_mesh_pop2020_01205室蘭市.csv")
+    return None
+
 @st.cache_resource
 def load_facilities():
-    return FacilityData("facilities.csv")
+    if os.path.exists("facilities.csv"):
+        return FacilityData("facilities.csv")
+    return None
 
-facility_data = load_facilities()
+# デフォルトデータをロード
+if st.session_state.engine is None:
+    st.session_state.engine = load_engine()
+if st.session_state.pop_data is None:
+    st.session_state.pop_data = load_population()
+if st.session_state.facility_data is None:
+    st.session_state.facility_data = load_facilities()
 
-engine = load_engine()
-pop_data = load_population()
+engine = st.session_state.engine
+pop_data = st.session_state.pop_data
+facility_data = st.session_state.facility_data
+
+# --- サイドバー: データアップロード ---
+with st.sidebar.expander("📂 データ設定", expanded=False):
+    st.markdown("**施設データ（CSV）**")
+    st.caption("カラム: name, type, latitude, longitude")
+    st.caption("[国土数値情報 医療機関](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-P04-v3_0.html)")
+    uploaded_facilities = st.file_uploader("施設CSV", type=["csv"], key="fac_upload")
+    if uploaded_facilities is not None:
+        try:
+            fac_df = pd.read_csv(uploaded_facilities)
+            required = {"name", "type", "latitude", "longitude"}
+            if required.issubset(set(fac_df.columns)):
+                fac_df.to_csv("uploaded_facilities.csv", index=False)
+                st.session_state.facility_data = FacilityData("uploaded_facilities.csv")
+                facility_data = st.session_state.facility_data
+                st.success(f"施設データ読み込み完了: {len(fac_df)}件")
+            else:
+                st.error(f"必須カラムが不足: {required - set(fac_df.columns)}")
+        except Exception as e:
+            st.error(f"読み込みエラー: {e}")
+
+    st.markdown("**人口データ（CSV）**")
+    st.caption("カラム: Meshcode, PopT, Pop65over 等")
+    st.caption("[簡易100mメッシュ人口](https://gtfs-gis.jp/teikyo/)")
+    uploaded_pop = st.file_uploader("人口CSV", type=["csv"], key="pop_upload")
+    if uploaded_pop is not None:
+        try:
+            pop_df = pd.read_csv(uploaded_pop)
+            if "Meshcode" in pop_df.columns and "PopT" in pop_df.columns:
+                pop_df.to_csv("uploaded_population.csv", index=False)
+                st.session_state.pop_data = PopulationData("uploaded_population.csv")
+                pop_data = st.session_state.pop_data
+                st.success(f"人口データ読み込み完了: {len(pop_df)}メッシュ")
+            else:
+                st.error("必須カラム（Meshcode, PopT）が不足")
+        except Exception as e:
+            st.error(f"読み込みエラー: {e}")
+
+    st.markdown("**GTFSデータ（ZIP）**")
+    st.caption("stops.txt, stop_times.txt 等を含むzip")
+    st.caption("[GTFS公開データ一覧](https://ckan.hoda.jp/dataset/gtfs-data) / [その他地域](https://gtfs-data.jp/)")
+    uploaded_gtfs = st.file_uploader("GTFS ZIP", type=["zip"], key="gtfs_upload")
+    if uploaded_gtfs is not None:
+        if st.button("GTFSデータを適用（数分かかります）"):
+            with st.spinner("GTFSデータを展開・ネットワーク構築中..."):
+                try:
+                    # zipを展開
+                    tmp_dir = "uploaded_gtfs"
+                    if os.path.exists(tmp_dir):
+                        shutil.rmtree(tmp_dir)
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    with zipfile.ZipFile(uploaded_gtfs, "r") as z:
+                        z.extractall(tmp_dir)
+
+                    # GTFSファイルを探す（サブフォルダ対応）
+                    gtfs_path = tmp_dir
+                    for root, dirs, files in os.walk(tmp_dir):
+                        if "stops.txt" in files and "stop_times.txt" in files:
+                            gtfs_path = root
+                            break
+
+                    # ネットワーク再構築
+                    build_network(gtfs_path, DATA_DIR)
+
+                    # エンジン再読み込み
+                    st.cache_resource.clear()
+                    st.session_state.engine = TransitEngine()
+                    engine = st.session_state.engine
+                    st.success("GTFSデータ適用完了！ネットワークを再構築しました。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"GTFSデータ適用エラー: {e}")
+
+# データソース表示
+area_name = "カスタムデータ" if os.path.exists("uploaded_gtfs") else "室蘭市 道南バス"
+st.caption(f"{area_name} GTFSデータに基づくシミュレーション")
 
 if "result_map" not in st.session_state:
     st.session_state.result_map = None
@@ -40,9 +138,11 @@ if "result_stats" not in st.session_state:
     st.session_state.result_stats = None
 
 # ===== サイドバー =====
+# ===== サイドバー =====
 st.sidebar.header("設定")
 
 stop_names = engine.get_stop_names()
+
 start_stop_name = st.sidebar.selectbox(
     "出発地点", stop_names,
     index=stop_names.index("室蘭駅前") if "室蘭駅前" in stop_names else 0
