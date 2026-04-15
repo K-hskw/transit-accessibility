@@ -524,6 +524,54 @@ if st.sidebar.button("シミュレーション実行", type="primary"):
             icon=folium.Icon(color="blue", icon="star")
         ).add_to(m)
 
+        # 施設マーカー表示（シミュレーションモード時）
+        if facility_data is not None and stats.get("mode") == "simulation":
+            sim_rb = stats["result_before"]
+            sim_ra = stats["result_after"]
+            sim_st = stats["start_time_sec"]
+            for ftype in facility_data.facility_types:
+                facilities = facility_data.get_facilities_by_type(ftype)
+                acc_before = facility_data.calc_facility_access(
+                    sim_rb, sim_st, facilities, engine.stop_coords
+                )
+                acc_after = facility_data.calc_facility_access(
+                    sim_ra, sim_st, facilities, engine.stop_coords
+                )
+                for ab, aa in zip(acc_before, acc_after):
+                    if ab["accessible"] and aa["accessible"]:
+                        color = "green"
+                        status = "✅ アクセス可能（変化なし）"
+                        time_info = f"所要: {aa['total_time_min']}分"
+                    elif ab["accessible"] and not aa["accessible"]:
+                        color = "red"
+                        status = "❌ アクセス不能になった"
+                        time_info = f"変更前: {ab['total_time_min']}分"
+                    elif not ab["accessible"] and aa["accessible"]:
+                        color = "green"
+                        status = "🆕 新たにアクセス可能"
+                        time_info = f"所要: {aa['total_time_min']}分"
+                    else:
+                        color = "gray"
+                        status = "⚪ 元からアクセス不能"
+                        time_info = ""
+
+                    popup_text = (
+                        f"<b>{ab['facility_name']}</b><br>"
+                        f"種別: {ab['facility_type']}<br>"
+                        f"{status}<br>"
+                        f"{time_info}<br>"
+                        f"最寄りバス停: {ab['nearest_stop']}<br>"
+                        f"バス停から徒歩: {ab['walk_time_min']}分（{ab['walk_distance_m']}m）"
+                    )
+
+                    icon_shape = "plus" if "病院" in ab["facility_type"] or "歯科" in ab["facility_type"] else "shopping-cart" if "スーパー" in ab["facility_type"] or "コンビニ" in ab["facility_type"] else "envelope" if "郵便局" in ab["facility_type"] else "medkit" if "薬局" in ab["facility_type"] else "info-sign"
+
+                    folium.Marker(
+                        location=[ab["facility_lat"], ab["facility_lon"]],
+                        popup=folium.Popup(popup_text, max_width=300),
+                        icon=folium.Icon(color=color, icon=icon_shape, prefix="glyphicon")
+                    ).add_to(m)
+
         st.session_state.result_map = m
         st.session_state.result_stats = stats
 
