@@ -510,7 +510,10 @@ if st.sidebar.button("シミュレーション実行", type="primary"):
                 "degraded": degraded,
                 "pop_impact": pop_impact,
                 "pop_before": pop_before,
-                "pop_after": pop_after
+                "pop_after": pop_after,
+                "result_before": result_before,
+                "result_after": result_after,
+                "start_time_sec": start_time_sec
             }
 
         # 出発地点
@@ -725,6 +728,57 @@ if st.session_state.result_map is not None:
             st.metric("影響を受ける人口", f"{stats['pop_impact']['affected_total']:,}人",
                       delta=f"-{stats['pop_impact']['affected_total']:,}人", delta_color="inverse")
             st.metric("うち高齢者(65歳以上)", f"{stats['pop_impact']['affected_elderly']:,}人")
+
+            # 施設アクセス比較
+            if facility_data is not None and "result_before" in stats:
+                st.divider()
+                st.subheader("施設アクセス影響")
+                sim_result_before = stats["result_before"]
+                sim_result_after = stats["result_after"]
+                sim_start_time = stats["start_time_sec"]
+                for ftype in facility_data.facility_types:
+                    facilities = facility_data.get_facilities_by_type(ftype)
+                    access_before = facility_data.calc_facility_access(
+                        sim_result_before, sim_start_time, facilities, engine.stop_coords
+                    )
+                    access_after = facility_data.calc_facility_access(
+                        sim_result_after, sim_start_time, facilities, engine.stop_coords
+                    )
+                    before_count = sum(1 for a in access_before if a["accessible"])
+                    after_count = sum(1 for a in access_after if a["accessible"])
+                    diff = after_count - before_count
+
+                    if diff < 0:
+                        st.metric(
+                            f"{ftype}",
+                            f"{after_count}/{len(access_after)}件",
+                            delta=f"{diff}件", delta_color="inverse"
+                        )
+                    else:
+                        st.metric(
+                            f"{ftype}",
+                            f"{after_count}/{len(access_after)}件"
+                        )
+
+                # 詳細：アクセス不能になった施設を表示
+                lost_facilities = []
+                for ftype in facility_data.facility_types:
+                    facilities = facility_data.get_facilities_by_type(ftype)
+                    access_before = facility_data.calc_facility_access(
+                        sim_result_before, sim_start_time, facilities, engine.stop_coords
+                    )
+                    access_after = facility_data.calc_facility_access(
+                        sim_result_after, sim_start_time, facilities, engine.stop_coords
+                    )
+                    for ab, aa in zip(access_before, access_after):
+                        if ab["accessible"] and not aa["accessible"]:
+                            lost_facilities.append(f"{ab['facility_name']}（{ab['facility_type']}）")
+
+                if lost_facilities:
+                    with st.expander(f"アクセス不能になった施設（{len(lost_facilities)}件）"):
+                        for name in lost_facilities:
+                            st.markdown(f"❌ {name}")
+
             st.markdown("**凡例**")
             st.markdown("⚫ 影響なし")
             st.markdown("🟠 到達時間悪化")
