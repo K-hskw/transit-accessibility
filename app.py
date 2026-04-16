@@ -157,7 +157,7 @@ start_time_sec = start_hour * 3600 + start_minute * 60
 max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30, 45, 60, 90], value=60)
 max_time_sec = max_time_min * 60
 
-mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス"])
+mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加"])
 
 remove_route_id = None
 selected_route_name = ""
@@ -243,6 +243,38 @@ elif mode == "減便":
         reduce_ratio = reduce_pct / 100
 
 threshold_min = st.sidebar.slider("悪化閾値（分）", 1, 15, 1)
+
+if mode == "デマンド交通":
+    demand_center_name = st.sidebar.selectbox(
+        "デマンド交通の中心バス停", stop_names,
+        index=stop_names.index("東室蘭駅東口") if "東室蘭駅東口" in stop_names else 0
+    )
+    demand_radius_m = st.sidebar.slider("デマンド交通の対象エリア半径（m）", 500, 5000, 2000, step=500)
+    demand_time_min = st.sidebar.slider("エリア内移動の所要時間（分）", 5, 30, 15)
+
+elif mode == "代替路線追加":
+    st.sidebar.markdown("**廃止する既存路線（任意）**")
+    direct_routes, transfer_routes = engine.get_routes_grouped_by_access(start_stop_name)
+    route_options_alt = {}
+    grouped_labels_alt = [""]
+    for r in direct_routes:
+        label = f"[直接] {r['route_name']}"
+        route_options_alt[label] = r["route_id"]
+        grouped_labels_alt.append(label)
+    for r in transfer_routes:
+        label = f"[乗換] {r['route_name']}"
+        route_options_alt[label] = r["route_id"]
+        grouped_labels_alt.append(label)
+    alt_remove_label = st.sidebar.selectbox("廃止路線（なしでもOK）", grouped_labels_alt)
+    alt_remove_route_id = route_options_alt.get(alt_remove_label, None) if alt_remove_label else None
+
+    st.sidebar.markdown("**新規ルートのバス停（2〜8個）**")
+    alt_new_stops_names = st.sidebar.multiselect(
+        "新ルートが結ぶバス停（順番通り）", stop_names,
+        default=[]
+    )
+    alt_interval = st.sidebar.slider("運行間隔（分）", 10, 120, 30, step=10)
+    alt_speed = st.sidebar.slider("平均速度（km/h）", 15, 60, 25, step=5)
 
 # ===== 地図生成ヘルパー =====
 def build_popup(stop_id, prev, start_time_sec, engine, prefix="", extra=""):
@@ -395,6 +427,36 @@ if st.sidebar.button("シミュレーション実行", type="primary"):
                         "all", reduce_ratio=reduce_ratio, track_path=True
                     )
                     sim_label = f"全路線一律 {int(reduce_ratio*100)}%削減"
+
+            elif mode == "デマンド交通":
+                demand_center_ids = engine.get_stop_ids_by_name(demand_center_name)
+                demand_center_id = demand_center_ids[0] if demand_center_ids else start_stop_id
+                result_after, prev_after = engine.simulate_demand_transit(
+                    start_stop_id, start_time_sec, max_time_sec,
+                    demand_center_id, radius_m=demand_radius_m,
+                    demand_time_sec=demand_time_min * 60, track_path=True
+                )
+                sim_label = f"デマンド交通: {demand_center_name}中心 {demand_radius_m}m圏 {demand_time_min}分"
+                remove_stop_ids = []
+
+            elif mode == "代替路線追加":
+                alt_new_stop_ids = []
+                for name in alt_new_stops_names:
+                    ids = engine.get_stop_ids_by_name(name)
+                    if ids:
+                        alt_new_stop_ids.append(ids[0])
+
+                if len(alt_new_stop_ids) < 2:
+                    st.warning("新ルートのバス停を2つ以上選択してください")
+                    st.stop()
+
+                result_after, prev_after = engine.simulate_route_replacement(
+                    start_stop_id, start_time_sec, max_time_sec,
+                    alt_remove_route_id, alt_new_stop_ids,
+                    interval_min=alt_interval, speed_kmh=alt_speed, track_path=True
+                )
+                sim_label = f"代替路線追加（{len(alt_new_stop_ids)}箇所経由, {alt_interval}分間隔）"
+                remove_stop_ids = []
 
             lost, degraded = engine.compare_results(
                 result_before, result_after, start_time_sec, threshold_min, remove_stop_ids

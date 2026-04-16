@@ -368,3 +368,135 @@ class TransitEngine:
                 if diff >= threshold_min:
                     degraded[stop_id] = diff
         return lost, degraded
+
+    def simulate_demand_transit(self, start_stop_id, start_time_sec, max_time_sec,
+                                    center_stop_id, radius_m=2000, demand_time_sec=900,
+                                    track_path=False):
+        """デマンド交通シミュレーション
+        center_stop_idを中心に半径radius_m以内のバス停間を、demand_time_sec秒で移動可能とする"""
+        from math import radians, sin, cos, sqrt, atan2
+
+        if center_stop_id not in self.stop_coords.index:
+            return self._dijkstra(
+                self._build_bus_graph(self.bus_edges),
+                self._build_walk_graph(self.walk_edges),
+                start_stop_id, start_time_sec, max_time_sec, track_path
+            )
+
+        center_lat = self.stop_coords.loc[center_stop_id, "stop_lat"]
+        center_lon = self.stop_coords.loc[center_stop_id, "stop_lon"]
+
+        def hav(lat1, lon1, lat2, lon2):
+            R = 6371000
+            dlat = radians(lat2 - lat1)
+            dlon = radians(lon2 - lon1)
+            a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+            return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+        # エリア内のバス停を抽出
+        in_area_stops = []
+        for sid in self.stop_coords.index:
+            slat = self.stop_coords.loc[sid, "stop_lat"]
+            slon = self.stop_coords.loc[sid, "stop_lon"]
+            dist = hav(center_lat, center_lon, slat, slon)
+            if dist <= radius_m:
+                in_area_stops.append(sid)
+
+        # デマンドエッジを既存の徒歩エッジに追加（時刻非依存なので徒歩エッジ扱い）
+        import pandas as pd
+        demand_edges = []
+        for s1 in in_area_stops:
+            for s2 in in_area_stops:
+                if s1 != s2:
+                    demand_edges.append({
+                        "from_stop": s1,
+                        "to_stop": s2,
+                        "walk_time": demand_time_sec,
+                        "distance": 0,
+                        "type": "demand"
+                    })
+        demand_df = pd.DataFrame(demand_edges)
+        combined_walk = pd.concat([self.walk_edges, demand_df], ignore_index=True) if len(demand_edges) > 0 else self.walk_edges
+
+        bus_graph = self._build_bus_graph(self.bus_edges)
+        walk_graph = self._build_walk_graph(combined_walk)
+        return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
+
+
+    def simulate_route_replacement(self, start_stop_id, start_time_sec, max_time_sec,
+                                    remove_route_id, new_route_stops, interval_min=30,
+                                    speed_kmh=25, track_path=False):
+        """路線廃止＋代替路線追加シミュレーション
+        remove_route_idを廃止し、new_route_stops（バス停IDのリスト）を結ぶ新路線を追加。
+        interval_min分間隔で運行、平均速度speed_kmhで所要時間を計算"""
+        from math import radians, sin, cos, sqrt, atan2
+        import pandas as pd
+
+        # 既存路線を廃止
+        if isinstance(remove_route_id, list):
+            edges_after = self.bus_edges[~self.bus_edges["route_id"].isin(remove_route_id)].copy()
+        elif remove_route_id is None or remove_route_id == "":
+            edges_after = self.bus_edges.copy()
+        else:
+            edges_after = self.bus_edges[self.bus_edges["route_id"] != remove_route_id].copy()
+
+        def hav(lat1, lon1, lat2, lon2):
+            R = 6371000
+            dlat = radians(lat2 - lat1)
+            dlon = radians(lon2 - lon1)
+            a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+            return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+        # 新路線のエッジを生成
+        new_edges = []
+        if len(new_route_stops) >= 2:
+            # 5時〜22時の間、interval_min間隔で運行
+            interval_sec = interval_min * 60
+            for trip_num, dep_base_sec in enumerate(range(5*3600, 22*3600, interval_sec)):
+                trip_id = f"NEW_TRIP_{trip_num}"
+                cumulative_time = 0
+                for i in range(len(new_route_stops) - 1):
+                    s1 = new_route_stops[i]
+                    s2 = new_route_stops[i+1]
+                    if s1 not in self.stop_coords.index or s2 not in self.stop_coords.index:
+                        continue
+                    lat1 = self.stop_coords.loc[s1, "stop_lat"]
+                    lon1 = self.stop_coords.loc[s1, "stop_lon"]
+                    lat2 = self.stop_coords.loc[s2, "stop_lat"]
+                    lon2 = self.stop_coords.loc[s2, "stop_lon"]
+                    dist_m = hav(lat1, lon1, lat2, lon2)
+                    travel_sec = int(dist_m / (speed_kmh * 1000 / 3600))
+
+                    dep_sec = dep_base_sec + cumulative_time
+                    arr_sec = dep_sec + travel_sec
+                    cumulative_time += travel_sec + 30  # 停車30秒
+
+                    new_edges.append({
+                        "from_stop": s1,
+                        "to_stop": s2,
+                        "departure_sec": dep_sec,
+                        "arrival_sec": arr_sec,
+                        "travel_time": travel_sec,
+                        "trip_id": trip_id,
+                        "route_id": "NEW_ROUTE",
+                        "type": "bus"
+                    })
+                    # 反対方向も追加
+                    new_edges.append({
+                        "from_stop": s2,
+                        "to_stop": s1,
+                        "departure_sec": dep_sec,
+                        "arrival_sec": arr_sec,
+                        "travel_time": travel_sec,
+                        "trip_id": trip_id + "_R",
+                        "route_id": "NEW_ROUTE",
+                        "type": "bus"
+                    })
+
+        if new_edges:
+            new_edges_df = pd.DataFrame(new_edges)
+            edges_after = pd.concat([edges_after, new_edges_df], ignore_index=True)
+
+        bus_graph = self._build_bus_graph(edges_after)
+        walk_graph = self._build_walk_graph(self.walk_edges)
+        return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
