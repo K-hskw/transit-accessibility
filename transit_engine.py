@@ -500,3 +500,70 @@ class TransitEngine:
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._build_walk_graph(self.walk_edges)
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
+    def calc_reverse_isochrone(self, dest_stop_id, arrival_time_sec, max_time_sec, track_path=False):
+        """逆方向到達圏計算（集客圏分析）
+        dest_stop_idにarrival_time_sec までに到達できる出発地点を計算する。
+        バスエッジを逆向きに辿り、arrival_time_secから過去方向に探索する。
+        """
+        import heapq
+
+        # 逆向きバスグラフの構築
+        # 通常: from_stop -> (dep_sec, arr_sec, to_stop, trip_id)
+        # 逆向き: to_stop -> (arr_sec, dep_sec, from_stop, trip_id)
+        rev_bus_graph = {}
+        for _, row in self.bus_edges.iterrows():
+            to_stop = row["to_stop"]
+            from_stop = row["from_stop"]
+            dep_sec = int(row["departure_sec"])
+            arr_sec = int(row["arrival_sec"])
+            trip_id = row["trip_id"]
+            if to_stop not in rev_bus_graph:
+                rev_bus_graph[to_stop] = []
+            rev_bus_graph[to_stop].append((arr_sec, dep_sec, from_stop, trip_id))
+
+        # 徒歩グラフはそのまま使用（無向グラフなので逆向きも同じ）
+        walk_graph = self._build_walk_graph(self.walk_edges)
+
+        # 逆向きダイクストラ
+        # best_departure[stop] = そのバス停から出発できる最遅の出発時刻
+        earliest_time = arrival_time_sec - max_time_sec
+        best_departure = {dest_stop_id: arrival_time_sec}
+        # キューは (-departure_time, stop) で最遅出発時刻を優先
+        queue = [(-arrival_time_sec, dest_stop_id)]
+
+        prev = {}
+        if track_path:
+            prev[dest_stop_id] = None
+
+        while queue:
+            neg_time, current_stop = heapq.heappop(queue)
+            current_time = -neg_time
+
+            if current_time < best_departure.get(current_stop, float("-inf")):
+                continue
+
+            # 逆向きバスエッジを辿る
+            if current_stop in rev_bus_graph:
+                for arr_sec, dep_sec, from_stop, trip_id in rev_bus_graph[current_stop]:
+                    # このバスはcurrent_timeまでに到着し、earliest_time以降に出発する
+                    if arr_sec <= current_time and dep_sec >= earliest_time:
+                        if dep_sec > best_departure.get(from_stop, float("-inf")):
+                            best_departure[from_stop] = dep_sec
+                            if track_path:
+                                prev[from_stop] = (current_stop, trip_id, dep_sec, arr_sec)
+                            heapq.heappush(queue, (-dep_sec, from_stop))
+
+            # 徒歩エッジを逆向きに辿る
+            if current_stop in walk_graph:
+                for to_stop, walk_time in walk_graph[current_stop]:
+                    dep_time = current_time - walk_time
+                    if dep_time >= earliest_time:
+                        if dep_time > best_departure.get(to_stop, float("-inf")):
+                            best_departure[to_stop] = dep_time
+                            if track_path:
+                                prev[to_stop] = (current_stop, "walk", dep_time, current_time)
+                            heapq.heappush(queue, (-dep_time, to_stop))
+
+        if track_path:
+            return best_departure, prev
+        return best_departure
