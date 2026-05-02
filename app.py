@@ -158,7 +158,7 @@ max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30
 max_time_sec = max_time_min * 60
 
 mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加"])
-
+mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加", "集客圏分析"])
 remove_route_id = None
 selected_route_name = ""
 remove_stop_ids = []
@@ -710,6 +710,112 @@ if mode == "時間帯別到達圏":
             st.markdown("🟢 0-15分　🟠 15-30分　🔴 30-45分　🟤 45-60分")
 
 # ===== 施設アクセス分析モード =====
+# ===== 集客圏分析モード =====
+if mode == "集客圏分析":
+    if facility_data is not None:
+        reverse_facility_type = st.sidebar.selectbox(
+            "施設種別", facility_data.facility_types, key="rev_ftype"
+        )
+        reverse_facilities_df = facility_data.get_facilities_by_type(reverse_facility_type)
+        reverse_facility_names = reverse_facilities_df["name"].tolist()
+        reverse_facility_name = st.sidebar.selectbox(
+            "目的施設", reverse_facility_names, key="rev_fname"
+        )
+    else:
+        reverse_facility_type = None
+        reverse_facility_name = None
+    arrival_hour_rev = st.sidebar.slider("到着時刻（時）", 5, 22, 9, key="rev_hour")
+    arrival_min_rev = st.sidebar.slider("到着時刻（分）", 0, 59, 0, step=10, key="rev_min")
+
+    if st.sidebar.button("集客圏分析実行", type="primary"):
+        if facility_data is None or reverse_facility_name is None:
+            st.error("施設データが読み込まれていません")
+        else:
+            arrival_time_rev = arrival_hour_rev * 3600 + arrival_min_rev * 60
+            facilities_df = facility_data.get_facilities_by_type(reverse_facility_type)
+            target_df = facilities_df[facilities_df["name"] == reverse_facility_name]
+            if target_df.empty:
+                st.error("施設が見つかりません")
+            else:
+                nearest = facility_data.find_nearest_stops(target_df, engine.stop_coords, max_distance=500)
+                if not nearest:
+                    st.error("500m以内にバス停が見つかりません")
+                else:
+                    dest_stop_id_rev = nearest[0]["nearest_stop"]
+                    dest_stop_name_rev = engine.stop_coords.loc[dest_stop_id_rev, "stop_name"] if dest_stop_id_rev in engine.stop_coords.index else str(dest_stop_id_rev)
+                    walk_min_rev = round(nearest[0]["walk_time_sec"] / 60, 1)
+
+                    with st.spinner("集客圏を計算中..."):
+                        rev_result = engine.calc_reverse_isochrone(
+                            dest_stop_id_rev, arrival_time_rev, max_time_sec
+                        )
+
+                    m = folium.Map(
+                        location=[engine.stop_coords["stop_lat"].mean(),
+                                  engine.stop_coords["stop_lon"].mean()],
+                        zoom_start=13, tiles="CartoDB positron"
+                    )
+
+                    for stop_id, dep_time in rev_result.items():
+                        if stop_id not in engine.stop_coords.index:
+                            continue
+                        row = engine.stop_coords.loc[stop_id]
+                        travel_min = (arrival_time_rev - dep_time) / 60
+                        if travel_min <= 15:
+                            color = "green"
+                        elif travel_min <= 30:
+                            color = "lightgreen"
+                        elif travel_min <= 45:
+                            color = "orange"
+                        else:
+                            color = "red"
+                        dep_h = int(dep_time // 3600)
+                        dep_m = int((dep_time % 3600) // 60)
+                        popup_text = (
+                            f"<b>{row['stop_name']}</b><br>"
+                            f"出発: {dep_h:02d}:{dep_m:02d}<br>"
+                            f"所要: {travel_min:.0f}分"
+                        )
+                        folium.CircleMarker(
+                            location=[row["stop_lat"], row["stop_lon"]],
+                            radius=6, color=color, fill=True, fill_opacity=0.8,
+                            popup=folium.Popup(popup_text, max_width=200)
+                        ).add_to(m)
+
+                    # 施設マーカー
+                    target_row = target_df.iloc[0]
+                    folium.Marker(
+                        location=[target_row["latitude"], target_row["longitude"]],
+                        popup=f"目的地: {reverse_facility_name}<br>最寄り: {dest_stop_name_rev}（徒歩{walk_min_rev}分）",
+                        icon=folium.Icon(color="blue", icon="star")
+                    ).add_to(m)
+
+                    # 最寄りバス停マーカー
+                    dest_row_rev = engine.stop_coords.loc[dest_stop_id_rev]
+                    folium.CircleMarker(
+                        location=[dest_row_rev["stop_lat"], dest_row_rev["stop_lon"]],
+                        radius=10, color="blue", fill=True, fill_opacity=0.9,
+                        popup=f"最寄りバス停: {dest_stop_name_rev}"
+                    ).add_to(m)
+
+                    rev_pop = None
+                    if pop_data is not None:
+                        rev_pop = pop_data.get_population_near_stops(
+                            engine.stop_coords, list(rev_result.keys()), radius_m=300
+                        )
+
+                    st.session_state.result_map = m
+                    st.session_state.result_stats = {
+                        "mode": "reverse",
+                        "dest_name": reverse_facility_name,
+                        "dest_type": reverse_facility_type,
+                        "nearest_stop": dest_stop_name_rev,
+                        "walk_min": walk_min_rev,
+                        "arrival_time": f"{arrival_hour_rev:02d}:{arrival_min_rev:02d}",
+                        "reachable": len(rev_result),
+                        "max_time_min": max_time_sec // 60,
+                        "pop_result": rev_pop,
+                    }
 if mode == "施設アクセス":
     facility_type = st.sidebar.selectbox("施設種別", facility_data.facility_types)
     walk_speed_option = st.sidebar.radio(
@@ -814,6 +920,24 @@ if st.session_state.result_map is not None:
 
     with col2:
         stats = st.session_state.result_stats
+        if stats["mode"] == "reverse":
+            st.subheader("集客圏分析")
+            st.caption(f"{stats['dest_name']}（{stats.get('dest_type','')}）")
+            st.caption(f"最寄りバス停: {stats.get('nearest_stop','')}（徒歩{stats.get('walk_min',0)}分）")
+            st.caption(f"到着: {stats['arrival_time']} / 制限: {stats['max_time_min']}分")
+            st.metric("集客圏バス停数", f"{stats['reachable']}箇所")
+            if stats.get("pop_result"):
+                st.divider()
+                st.subheader("カバー人口")
+                st.metric("カバー人口", f"{stats['pop_result']['total']:,}人")
+                st.metric("うち高齢者", f"{stats['pop_result']['elderly']:,}人")
+            st.divider()
+            st.markdown("**凡例**")
+            st.markdown("🟢 15分以内")
+            st.markdown("🟡 15〜30分")
+            st.markdown("🟠 30〜45分")
+            st.markdown("🔴 45〜60分")
+        elif stats["mode"] == "到達圏のみ":
 
         if stats["mode"] == "到達圏のみ":
             st.metric("到達可能バス停数", f"{stats['reachable']}箇所")
