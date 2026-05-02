@@ -938,8 +938,6 @@ if st.session_state.result_map is not None:
             st.markdown("🟠 30〜45分")
             st.markdown("🔴 45〜60分")
         elif stats["mode"] == "到達圏のみ":
-
-        if stats["mode"] == "到達圏のみ":
             st.metric("到達可能バス停数", f"{stats['reachable']}箇所")
             st.markdown("**凡例**")
             st.markdown("🟢 0-15分")
