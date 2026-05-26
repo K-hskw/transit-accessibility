@@ -157,7 +157,6 @@ start_time_sec = start_hour * 3600 + start_minute * 60
 max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30, 45, 60, 90], value=60)
 max_time_sec = max_time_min * 60
 
-mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加"])
 mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加", "集客圏分析"])
 remove_route_id = None
 selected_route_name = ""
