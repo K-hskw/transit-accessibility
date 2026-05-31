@@ -44,7 +44,7 @@ class TransitEngine:
         for rid in route_ids:
             name = self.route_names.get(rid, "不明")
             if exclude_highway:
-                if any(kw in name for kw in ["高速", "都市間", "Express", "express"]):
+                if name and any(kw in str(name) for kw in ["高速", "都市間", "Express", "express"]):
                     continue
             result.append({"route_id": rid, "route_name": name})
         return result
