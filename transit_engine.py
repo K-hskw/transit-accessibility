@@ -119,6 +119,7 @@ class TransitEngine:
         m = int((sec % 3600) // 60)
         return f"{h:02d}:{m:02d}"
 
+    #時間依存最短経路探索アルゴリズム
     def _dijkstra(self, bus_graph, walk_graph, start_stop, start_time_sec, max_time_sec, track_path=False):
         best_arrival = {start_stop: start_time_sec}
         queue = [(start_time_sec, start_stop, "start")]
