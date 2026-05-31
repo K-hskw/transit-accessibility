@@ -51,7 +51,10 @@ def load_facilities():
 
 # デフォルトデータをロード
 if st.session_state.engine is None:
-    st.session_state.engine = load_engine()
+    if os.path.exists(GTFS_DIR_CUSTOM) and os.path.exists("bus_edges_custom.csv"):
+        st.session_state.engine = load_custom_engine(GTFS_DIR_CUSTOM)
+    else:
+        st.session_state.engine = load_engine()
 if st.session_state.pop_data is None:
     st.session_state.pop_data = load_population()
 if st.session_state.facility_data is None:
