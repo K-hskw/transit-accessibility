@@ -120,7 +120,7 @@ class TransitEngine:
         return f"{h:02d}:{m:02d}"
 
     def _dijkstra(self, bus_graph, walk_graph, start_stop, start_time_sec, max_time_sec, track_path=False):
-        best_arrival = {(start_stop, "start"): start_time_sec}
+        best_arrival = {start_stop: start_time_sec}
         queue = [(start_time_sec, start_stop, "start")]
         deadline = start_time_sec + max_time_sec
 
@@ -128,57 +128,45 @@ class TransitEngine:
         if track_path:
             prev[start_stop] = None
 
-        visited_best = {}
+        best_state = {(start_stop, "start"): start_time_sec}
 
         while queue:
             current_time, current_stop, last_mode = heapq.heappop(queue)
 
             state = (current_stop, last_mode)
-            if current_time > visited_best.get(state, float("inf")):
+            if current_time > best_state.get(state, float("inf")):
                 continue
-            visited_best[state] = current_time
-
             if current_time > deadline:
                 continue
 
-            # バスエッジ（直前の移動種別に関わらず常に利用可）
             if current_stop in bus_graph:
                 for dep_sec, arr_sec, to_stop, trip_id in bus_graph[current_stop]:
                     if dep_sec >= current_time and arr_sec <= deadline:
                         new_state = (to_stop, "bus")
-                        if arr_sec < best_arrival.get(new_state, float("inf")):
-                            best_arrival[new_state] = arr_sec
-                            if track_path:
-                                if arr_sec < best_arrival.get((to_stop, "walk"), float("inf")):
+                        if arr_sec < best_state.get(new_state, float("inf")):
+                            best_state[new_state] = arr_sec
+                            if arr_sec < best_arrival.get(to_stop, float("inf")):
+                                best_arrival[to_stop] = arr_sec
+                                if track_path:
                                     prev[to_stop] = (current_stop, trip_id, dep_sec, arr_sec)
                             heapq.heappush(queue, (arr_sec, to_stop, "bus"))
 
-            # 徒歩エッジ（直前が徒歩の場合は禁止）
             if last_mode != "walk" and current_stop in walk_graph:
                 for to_stop, walk_time in walk_graph[current_stop]:
                     arr_time = current_time + walk_time
                     if arr_time <= deadline:
                         new_state = (to_stop, "walk")
-                        if arr_time < best_arrival.get(new_state, float("inf")):
-                            best_arrival[new_state] = arr_time
-                            if track_path:
-                                cur_best = min(
-                                    best_arrival.get((to_stop, "bus"), float("inf")),
-                                    best_arrival.get((to_stop, "walk"), float("inf"))
-                                )
-                                if arr_time <= cur_best:
+                        if arr_time < best_state.get(new_state, float("inf")):
+                            best_state[new_state] = arr_time
+                            if arr_time < best_arrival.get(to_stop, float("inf")):
+                                best_arrival[to_stop] = arr_time
+                                if track_path:
                                     prev[to_stop] = (current_stop, "walk", current_time, arr_time)
                             heapq.heappush(queue, (arr_time, to_stop, "walk"))
 
-        # best_arrivalを {stop_id: arrival_time} 形式に変換（後方互換）
-        result = {}
-        for (stop_id, mode), arr_time in best_arrival.items():
-            if stop_id not in result or arr_time < result[stop_id]:
-                result[stop_id] = arr_time
-
         if track_path:
-            return result, prev
-        return result
+            return best_arrival, prev
+        return best_arrival
 
     def reconstruct_path(self, prev, target_stop_id):
         if target_stop_id not in prev:
