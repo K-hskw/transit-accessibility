@@ -15,7 +15,8 @@ st.title("公共交通アクセシビリティ分析ツール")
 
 # ===== データ管理 =====
 DATA_DIR = "."
-GTFS_DIR = os.path.join(DATA_DIR, "gtfs_data")
+GTFS_DIR_DEFAULT = "gtfs_data"        # デフォルト（室蘭）
+GTFS_DIR_CUSTOM = "gtfs_data_custom"  # アップロード用
 
 # セッション状態の初期化
 if "data_source" not in st.session_state:
@@ -30,7 +31,11 @@ if "facility_data" not in st.session_state:
 # --- デフォルトデータの読み込み ---
 @st.cache_resource
 def load_engine():
-    return TransitEngine()
+    return TransitEngine(gtfs_dir=GTFS_DIR_DEFAULT)
+
+@st.cache_resource
+def load_custom_engine(gtfs_dir):
+    return TransitEngine(gtfs_dir=gtfs_dir)
 
 @st.cache_resource
 def load_population():
@@ -116,22 +121,27 @@ with st.sidebar.expander("📂 データ設定", expanded=False):
                             gtfs_path = root
                             break
 
-                    # gtfs_dataフォルダを更新（stops.txt等をコピー）
-                    os.makedirs("gtfs_data", exist_ok=True)
+                    # カスタムGTFSフォルダに展開（デフォルトを上書きしない）
+                    os.makedirs(GTFS_DIR_CUSTOM, exist_ok=True)
                     for fname in ["stops.txt", "stop_times.txt", "routes.txt",
                                   "trips.txt", "calendar.txt", "shapes.txt",
                                   "agency.txt", "feed_info.txt"]:
                         src = os.path.join(gtfs_path, fname)
-                        dst = os.path.join("gtfs_data", fname)
+                        dst = os.path.join(GTFS_DIR_CUSTOM, fname)
                         if os.path.exists(src):
                             shutil.copy2(src, dst)
 
-                    # ネットワーク再構築
+                    # カスタムエッジファイルを生成
                     build_network(gtfs_path, DATA_DIR)
+                    shutil.copy2("bus_edges.csv", "bus_edges_custom.csv")
+                    shutil.copy2("walk_edges.csv", "walk_edges_custom.csv")
+                    # デフォルトエッジに戻す
+                    shutil.copy2("bus_edges_default.csv", "bus_edges.csv")
+                    shutil.copy2("walk_edges_default.csv", "walk_edges.csv")
 
-                    # エンジン再読み込み
+                    # エンジン再読み込み（カスタム）
                     st.cache_resource.clear()
-                    st.session_state.engine = TransitEngine()
+                    st.session_state.engine = TransitEngine(gtfs_dir=GTFS_DIR_CUSTOM)
                     engine = st.session_state.engine
                     st.success("GTFSデータ適用完了！ネットワークを再構築しました。")
                     st.rerun()
