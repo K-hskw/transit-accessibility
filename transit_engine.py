@@ -55,9 +55,8 @@ class TransitEngine:
         return result
 
     def get_stop_names(self):
-        muroran = self.get_muroran_stops()
-        names = sorted(muroran["stop_name"].unique())
-        return names
+    　　names = sorted(self.stops["stop_name"].unique())
+    return names
 
     def get_stop_ids_by_name(self, stop_name):
         return self.stops[self.stops["stop_name"] == stop_name]["stop_id"].tolist()
