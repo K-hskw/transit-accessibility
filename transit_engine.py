@@ -38,25 +38,20 @@ class TransitEngine:
         return self.stops[mask]
 
     def get_muroran_routes(self, exclude_highway=True):
-        """室蘭市内を通る路線の一覧を返す"""
-        muroran_stop_ids = self.get_muroran_stops()["stop_id"].tolist()
-        muroran_edges = self.bus_edges[
-            (self.bus_edges["from_stop"].isin(muroran_stop_ids)) |
-            (self.bus_edges["to_stop"].isin(muroran_stop_ids))
-        ]
-        route_ids = muroran_edges["route_id"].unique()
+        """路線の一覧を返す（他地域対応版）"""
+        route_ids = self.bus_edges["route_id"].unique()
         result = []
         for rid in route_ids:
             name = self.route_names.get(rid, "不明")
             if exclude_highway:
-                if any(kw in name for kw in ["高速", "都市間"]):
+                if any(kw in name for kw in ["高速", "都市間", "Express", "express"]):
                     continue
             result.append({"route_id": rid, "route_name": name})
         return result
 
     def get_stop_names(self):
-    　　names = sorted(self.stops["stop_name"].unique())
-    return names
+        names = sorted(self.stops["stop_name"].unique())
+        return names
 
     def get_stop_ids_by_name(self, stop_name):
         return self.stops[self.stops["stop_name"] == stop_name]["stop_id"].tolist()
