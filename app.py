@@ -151,8 +151,27 @@ with st.sidebar.expander("📂 データ設定", expanded=False):
                 except Exception as e:
                     st.error(f"GTFSデータ適用エラー: {e}")
 
+    # デフォルトデータに戻すボタン
+    if os.path.exists(GTFS_DIR_CUSTOM):
+        st.divider()
+        if st.button("🔄 デフォルト（室蘭）に戻す"):
+            if os.path.exists(GTFS_DIR_CUSTOM):
+                shutil.rmtree(GTFS_DIR_CUSTOM)
+            if os.path.exists("bus_edges_custom.csv"):
+                os.remove("bus_edges_custom.csv")
+            if os.path.exists("walk_edges_custom.csv"):
+                os.remove("walk_edges_custom.csv")
+            st.cache_resource.clear()
+            st.session_state.engine = load_engine()
+            engine = st.session_state.engine
+            st.success("デフォルトデータに戻しました")
+            st.rerun()
+
 # データソース表示
-area_name = "カスタムデータ" if os.path.exists("uploaded_gtfs") else "室蘭市 道南バス"
+if os.path.exists(GTFS_DIR_CUSTOM):
+    area_name = "カスタムデータ"
+else:
+    area_name = "室蘭市 道南バス"
 st.caption(f"{area_name} GTFSデータに基づくシミュレーション")
 
 if "result_map" not in st.session_state:
