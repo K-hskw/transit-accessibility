@@ -17,8 +17,13 @@ class TransitEngine:
         self.routes = pd.read_csv(f"{gtfs_dir}/routes.txt")
         self.trips = pd.read_csv(f"{gtfs_dir}/trips.txt")
         self.calendar = pd.read_csv(f"{gtfs_dir}/calendar.txt")
-        self.bus_edges = pd.read_csv("bus_edges.csv")
-        self.walk_edges = pd.read_csv("walk_edges.csv")
+        # カスタムGTFSの場合は対応するエッジファイルを使用
+        if gtfs_dir == "gtfs_data_custom" and os.path.exists("bus_edges_custom.csv"):
+            self.bus_edges = pd.read_csv("bus_edges_custom.csv")
+            self.walk_edges = pd.read_csv("walk_edges_custom.csv")
+        else:
+            self.bus_edges = pd.read_csv("bus_edges.csv")
+            self.walk_edges = pd.read_csv("walk_edges.csv")
 
         self.trip_to_route = self.trips.set_index("trip_id")["route_id"].to_dict()
         self.bus_edges["route_id"] = self.bus_edges["trip_id"].map(self.trip_to_route)
