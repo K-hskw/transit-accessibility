@@ -1,7 +1,7 @@
+import os
 import pandas as pd
 import heapq
 from math import radians, sin, cos, sqrt, atan2
-
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
