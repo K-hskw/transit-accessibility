@@ -116,6 +116,16 @@ with st.sidebar.expander("📂 データ設定", expanded=False):
                             gtfs_path = root
                             break
 
+                    # gtfs_dataフォルダを更新（stops.txt等をコピー）
+                    os.makedirs("gtfs_data", exist_ok=True)
+                    for fname in ["stops.txt", "stop_times.txt", "routes.txt",
+                                  "trips.txt", "calendar.txt", "shapes.txt",
+                                  "agency.txt", "feed_info.txt"]:
+                        src = os.path.join(gtfs_path, fname)
+                        dst = os.path.join("gtfs_data", fname)
+                        if os.path.exists(src):
+                            shutil.copy2(src, dst)
+
                     # ネットワーク再構築
                     build_network(gtfs_path, DATA_DIR)
 
