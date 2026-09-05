@@ -5,3 +5,5 @@ streamlit
 streamlit-folium
 shapely
 networkx
+numpy
+pydeck

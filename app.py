@@ -1,14 +1,17 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 import folium
 import os
 import zipfile
 import tempfile
 import shutil
+import pydeck as pdk
 from streamlit_folium import st_folium
 from transit_engine import TransitEngine
 from population import PopulationData, FacilityData
 from build_network import build_network
+from blank_area import BlankAreaAnalyzer, aggregate_to_500m
 
 st.set_page_config(page_title="公共交通アクセシビリティ分析", layout="wide")
 st.title("公共交通アクセシビリティ分析ツール")
@@ -48,6 +51,12 @@ def load_facilities():
     if os.path.exists("facilities.csv"):
         return FacilityData("facilities.csv")
     return None
+
+@st.cache_resource
+def load_blank_analyzer(_engine, _pop_data, max_walk_m, walk_speed):
+    # メッシュ×バス停の徒歩対応表は徒歩条件ごとに1度だけ作れば足りる
+    return BlankAreaAnalyzer(_engine, _pop_data,
+                             max_walk_m=max_walk_m, walk_speed_m_min=walk_speed)
 
 # デフォルトデータをロード
 if st.session_state.engine is None:
@@ -199,7 +208,7 @@ start_time_sec = start_hour * 3600 + start_minute * 60
 max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30, 45, 60, 90], value=60)
 max_time_sec = max_time_min * 60
 
-mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加", "集客圏分析"])
+mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加", "集客圏分析", "時間空白診断（3D）"])
 remove_route_id = None
 selected_route_name = ""
 remove_stop_ids = []
@@ -316,6 +325,28 @@ elif mode == "代替路線追加":
     )
     alt_interval = st.sidebar.slider("運行間隔（分）", 10, 120, 30, step=10)
     alt_speed = st.sidebar.slider("平均速度（km/h）", 15, 60, 25, step=5)
+
+elif mode == "時間空白診断（3D）":
+    st.sidebar.markdown("**生活拠点（ここに着けるかで空白を判定）**")
+    blank_dest_names = st.sidebar.multiselect(
+        "拠点バス停（複数可）", stop_names,
+        default=[n for n in ["東室蘭駅東口"] if n in stop_names]
+    )
+    blank_dest_ids = []
+    for n in blank_dest_names:
+        blank_dest_ids.extend(engine.get_stop_ids_by_name(n))
+
+    blank_walk_m = st.sidebar.slider("メッシュから乗車できる徒歩距離（m）", 200, 1000, 500, step=100)
+    blank_walk_speed = st.sidebar.radio(
+        "徒歩速度", [67, 40],
+        format_func=lambda v: "一般 67m/分" if v == 67 else "高齢者 40m/分"
+    )
+    blank_mesh_level = st.sidebar.radio(
+        "メッシュ粒度", [500, 100],
+        format_func=lambda v: f"{v}mメッシュ"
+    )
+    st.sidebar.caption("100mメッシュは1kmの10等分のため250mには割り切れない。標準メッシュで作れるのは500m（5×5セル）。")
+    blank_elev_scale = st.sidebar.slider("柱の高さ倍率", 1, 20, 6)
 
 # ===== 地図生成ヘルパー =====
 def build_popup(stop_id, prev, start_time_sec, engine, prefix="", extra=""):
@@ -952,8 +983,123 @@ if mode == "施設アクセス":
                     for fac in access:
                         if not fac["accessible"]:
                             st.markdown(f"❌ {fac['facility_name']}")
+# ===== 時間空白診断（3Dカラム）モード =====
+if mode == "時間空白診断（3D）":
+    st.subheader("時間空白診断")
+    st.caption("柱の高さ＝その時間帯に拠点へ着けない人口。色＝1日のうち何時間帯で空白になるか。")
+
+    if pop_data is None:
+        st.warning("メッシュ人口データが読み込まれていないため、この分析は実行できません。")
+    elif not blank_dest_ids:
+        st.info("サイドバーで生活拠点のバス停を1つ以上選んでください。")
+    else:
+        analyzer = load_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
+
+        if st.sidebar.button("空白診断を実行", type="primary"):
+            hours = list(range(5, 23))
+            with st.spinner("全時間帯の空白人口を計算中..."):
+                per_hour = {}
+                blank_hours = np.zeros(analyzer.n_mesh, dtype=int)
+                for h in hours:
+                    df_h = analyzer.diagnose(blank_dest_ids, h * 3600, max_time_sec)
+                    per_hour[h] = df_h
+                    blank_hours += (~df_h["reachable"]).to_numpy().astype(int)
+            st.session_state.blank_result = {
+                "hours": hours,
+                "per_hour": per_hour,
+                "blank_hours": blank_hours,
+                "dest_names": list(blank_dest_names),
+                "max_time_min": max_time_min,
+                "walk_m": blank_walk_m,
+                "walk_speed": blank_walk_speed,
+            }
+
+        result = st.session_state.get("blank_result")
+        if result is None:
+            st.info("サイドバーの「空白診断を実行」を押してください。")
+        else:
+            st.caption(
+                f"拠点: {'、'.join(result['dest_names'])} ／ 制限 {result['max_time_min']}分 ／ "
+                f"徒歩 {result['walk_m']}m・{result['walk_speed']}m/分"
+            )
+            sel_hour = st.slider("到着時刻（時）", min(result["hours"]), max(result["hours"]),
+                                 min(9, max(result["hours"])))
+            df_sel = result["per_hour"][sel_hour].copy()
+            df_sel["blank_hours"] = result["blank_hours"]
+
+            if blank_mesh_level == 500:
+                cells = aggregate_to_500m(df_sel)
+                radius = 250
+            else:
+                cells = df_sel.assign(
+                    blank_pop=np.where(df_sel["reachable"], 0.0, df_sel["pop"]),
+                    blank_elderly=np.where(df_sel["reachable"], 0.0, df_sel["elderly"]),
+                )
+                radius = 50
+
+            columns = cells[cells["blank_pop"] > 0].copy()
+            n_hours = len(result["hours"])
+
+            # 色＝深刻度（空白になる時間帯の数）。黄 → 赤。
+            ratio = (columns["blank_hours"] / n_hours).clip(0, 1)
+            columns["r"] = 250
+            columns["g"] = ((1 - ratio) * 200).round().astype(int)
+            columns["b"] = ((1 - ratio) * 60).round().astype(int)
+            columns["blank_pop_disp"] = columns["blank_pop"].round().astype(int)
+            columns["blank_elderly_disp"] = columns["blank_elderly"].round().astype(int)
+
+            total_pop = float(df_sel["pop"].sum())
+            blank_pop = float(df_sel.loc[~df_sel["reachable"], "pop"].sum())
+            blank_eld = float(df_sel.loc[~df_sel["reachable"], "elderly"].sum())
+            static_pop = float(df_sel.loc[df_sel["static_blank"], "pop"].sum())
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("空白人口", f"{blank_pop:,.0f}人", f"{100*blank_pop/max(total_pop,1):.1f}%")
+            c2.metric("うち高齢者", f"{blank_eld:,.0f}人")
+            c3.metric("静的空白（徒歩圏にバス停なし）", f"{static_pop:,.0f}人")
+            c4.metric("時間空白（バス停はあるが間に合わない）",
+                      f"{blank_pop - static_pop:,.0f}人")
+
+            view = pdk.ViewState(
+                latitude=float(df_sel["lat"].mean()),
+                longitude=float(df_sel["lon"].mean()),
+                zoom=11, pitch=50, bearing=0,
+            )
+            layer = pdk.Layer(
+                "ColumnLayer",
+                data=columns[["lon", "lat", "blank_pop", "blank_pop_disp",
+                              "blank_elderly_disp", "blank_hours", "r", "g", "b"]],
+                get_position=["lon", "lat"],
+                get_elevation="blank_pop",
+                elevation_scale=blank_elev_scale,
+                radius=radius,
+                get_fill_color=["r", "g", "b", 200],
+                pickable=True,
+                auto_highlight=True,
+            )
+            st.pydeck_chart(pdk.Deck(
+                layers=[layer],
+                initial_view_state=view,
+                map_style="light",
+                tooltip={"text": "空白人口 {blank_pop_disp}人\n"
+                                 "うち高齢者 {blank_elderly_disp}人\n"
+                                 "空白になる時間帯 {blank_hours}/" + str(n_hours)},
+            ))
+
+            st.caption("色: 黄＝一部の時間帯だけ空白 / 赤＝ほぼ終日空白")
+
+            st.markdown("**時間帯別の空白人口**")
+            hourly = pd.DataFrame({
+                "時": result["hours"],
+                "空白人口": [
+                    float(result["per_hour"][h].loc[~result["per_hour"][h]["reachable"], "pop"].sum())
+                    for h in result["hours"]
+                ],
+            }).set_index("時")
+            st.bar_chart(hourly)
+
 # ===== 結果表示 =====
-if st.session_state.result_map is not None:
+if mode != "時間空白診断（3D）" and st.session_state.result_map is not None:
     col1, col2 = st.columns([3, 1])
 
     with col1:

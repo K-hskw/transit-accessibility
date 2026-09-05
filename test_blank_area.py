@@ -102,6 +102,37 @@ test("空白人口は常に非負", (by_hour["blank_pop"] >= 0).all())
 print(f"  最小 {by_hour['blank_pop'].min():,} ({int(by_hour.loc[by_hour['blank_pop'].idxmin(), 'hour'])}時) / "
       f"最大 {by_hour['blank_pop'].max():,} ({int(by_hour.loc[by_hour['blank_pop'].idxmax(), 'hour'])}時)")
 
+# ===== 6. 500mメッシュ集約 =====
+print("\n--- 6. 500mメッシュ集約 ---")
+from blank_area import aggregate_to_500m
+
+df9 = analyzer.diagnose(dest, 9 * 3600, max_time)
+df9["blank_hours"] = analyzer.blank_hours_by_mesh(dest, range(7, 20), max_time)
+cells = aggregate_to_500m(df9)
+
+test("集約でメッシュ数が減る", len(cells) < len(df9), f"{len(df9)} -> {len(cells)}")
+test("集約しても総人口は保存される",
+     abs(cells["pop"].sum() - df9["pop"].sum()) < 1e-6,
+     f"{cells['pop'].sum()} vs {df9['pop'].sum()}")
+test("集約しても空白人口は保存される",
+     abs(cells["blank_pop"].sum() - df9.loc[~df9["reachable"], "pop"].sum()) < 1e-6)
+test("空白人口 <= 人口（各セル）", (cells["blank_pop"] <= cells["pop"] + 1e-9).all())
+test("深刻度が集約後も範囲内",
+     cells["blank_hours"].between(0, 13).all(), f"最大{cells['blank_hours'].max()}")
+
+# 500mセルの中心が構成メッシュの範囲内にあること（座標計算の検算）
+merged = df9.assign(
+    cell=df9["meshcode"].astype(str).str[:8]
+         + (df9["meshcode"].astype(str).str[8].astype(int) // 5).astype(str)
+         + (df9["meshcode"].astype(str).str[9].astype(int) // 5).astype(str)
+).merge(cells[["cell", "lat", "lon"]], on="cell", suffixes=("", "_cell"))
+test("500mセル中心と構成メッシュの距離が354m以内",
+     ((merged["lat"] - merged["lat_cell"]).abs() < 0.0025).all()
+     and ((merged["lon"] - merged["lon_cell"]).abs() < 0.0035).all(),
+     f"最大 lat差{(merged['lat']-merged['lat_cell']).abs().max():.5f} "
+     f"lon差{(merged['lon']-merged['lon_cell']).abs().max():.5f}")
+print(f"  100mメッシュ {len(df9)} -> 500mセル {len(cells)}")
+
 print("\n" + "=" * 70)
 print(f"テスト結果: {tests_passed}/{tests_run} パス")
 if errors:
