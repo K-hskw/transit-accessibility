@@ -52,7 +52,12 @@ def build_network(gtfs_dir="gtfs_data", output_dir="."):
             arr_time = int(rows[i+1][arr_idx])
             travel_time = arr_time - dep_time
 
-            if travel_time > 0:
+            # GTFS-JPの時刻は分単位のため、近接する停留所間は travel_time が
+            # 0 になる。これを除外すると便の連鎖が切れ、その先の停留所が
+            # 到達不能になる（道南バスでは2,737区間・148停留所が消えていた）。
+            # 時刻表の時刻は絶対値なので0秒エッジを残しても誤差は停留所あたり
+            # 1分未満で、便の総所要時間には累積しない。時刻逆転（負値）のみ除外。
+            if travel_time >= 0:
                 edges.append({
                     "from_stop": from_stop,
                     "to_stop": to_stop,

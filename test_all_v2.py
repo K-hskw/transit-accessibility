@@ -148,7 +148,10 @@ if len(routes) >= 3:
          f"前{len(result_before)} 後{len(result_after)}")
 
 # 全路線同時廃止（バスなしの状態）
-all_route_ids = [r["route_id"] for r in routes]
+# routes は get_muroran_routes() の戻り値で高速バスを除外しているため、
+# それだけを廃止しても高速5路線が残り「徒歩のみ」にならない。
+# バスを完全に止めた状態を作るには bus_edges 上の全route_idを廃止する。
+all_route_ids = engine.bus_edges["route_id"].dropna().unique().tolist()
 result_no_bus, _ = engine.simulate_route_removal(
     start_id, start_time, max_time, all_route_ids, track_path=True
 )
