@@ -3,6 +3,8 @@ import pandas as pd
 import heapq
 from math import radians, sin, cos, sqrt, atan2
 
+from service_calendar import DAY_TYPES, available_day_types, trip_ids_for_day_type
+
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     dlat = radians(lat2 - lat1)
@@ -12,21 +14,25 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 class TransitEngine:
-    def __init__(self, gtfs_dir="gtfs_data"):
+    def __init__(self, gtfs_dir="gtfs_data", day_type="平日"):
         self.stops = pd.read_csv(f"{gtfs_dir}/stops.txt")
         self.routes = pd.read_csv(f"{gtfs_dir}/routes.txt")
         self.trips = pd.read_csv(f"{gtfs_dir}/trips.txt")
         self.calendar = pd.read_csv(f"{gtfs_dir}/calendar.txt")
         # カスタムGTFSの場合は対応するエッジファイルを使用
         if gtfs_dir == "gtfs_data_custom" and os.path.exists("bus_edges_custom.csv"):
-            self.bus_edges = pd.read_csv("bus_edges_custom.csv")
+            self.all_bus_edges = pd.read_csv("bus_edges_custom.csv")
             self.walk_edges = pd.read_csv("walk_edges_custom.csv")
         else:
-            self.bus_edges = pd.read_csv("bus_edges.csv")
+            self.all_bus_edges = pd.read_csv("bus_edges.csv")
             self.walk_edges = pd.read_csv("walk_edges.csv")
 
         self.trip_to_route = self.trips.set_index("trip_id")["route_id"].to_dict()
-        self.bus_edges["route_id"] = self.bus_edges["trip_id"].map(self.trip_to_route)
+        self.all_bus_edges["route_id"] = self.all_bus_edges["trip_id"].map(self.trip_to_route)
+
+        # エッジは全ダイヤ分を持ち、bus_edges は選択中のダイヤ種別の絞り込み結果
+        self.available_day_types = available_day_types(self.trips, self.calendar)
+        self.day_type = None
 
         self.route_names = self.routes.set_index("route_id")["route_long_name"].to_dict()
         self.stop_coords = self.stops.set_index("stop_id")[["stop_lat", "stop_lon", "stop_name"]]
@@ -43,11 +49,32 @@ class TransitEngine:
         self._walk_graph_cache = None
         self._rev_bus_graph_cache = None
 
+        self.set_day_type(day_type)
+
     def clear_graph_cache(self):
         """bus_edges / walk_edges を差し替えたときにキャッシュを破棄する"""
         self._bus_graph_cache = None
         self._walk_graph_cache = None
         self._rev_bus_graph_cache = None
+
+    def set_day_type(self, day_type):
+        """ダイヤ種別（平日/土曜/日祝）を切り替える
+
+        全便のエッジは all_bus_edges に保持し、bus_edges をその絞り込み結果に
+        差し替える。ネットワークを作り直す必要はないが、グラフのキャッシュは
+        中身が変わるので破棄する。
+        """
+        if day_type == self.day_type:
+            return
+        if day_type not in DAY_TYPES:
+            raise ValueError(f"未知のダイヤ種別: {day_type}（{DAY_TYPES} のいずれか）")
+
+        trip_ids = trip_ids_for_day_type(self.trips, self.calendar, day_type)
+        self.day_type = day_type
+        self.bus_edges = self.all_bus_edges[
+            self.all_bus_edges["trip_id"].isin(trip_ids)
+        ].reset_index(drop=True)
+        self.clear_graph_cache()
 
     def _full_bus_graph(self):
         if self._bus_graph_cache is None:
@@ -400,59 +427,6 @@ class TransitEngine:
                 if diff >= threshold_min:
                     degraded[stop_id] = diff
         return lost, degraded
-
-    def simulate_demand_transit(self, start_stop_id, start_time_sec, max_time_sec,
-                                    center_stop_id, radius_m=2000, demand_time_sec=900,
-                                    track_path=False):
-        """デマンド交通シミュレーション
-        center_stop_idを中心に半径radius_m以内のバス停間を、demand_time_sec秒で移動可能とする"""
-        from math import radians, sin, cos, sqrt, atan2
-
-        if center_stop_id not in self.stop_coords.index:
-            bus_graph, walk_graph = self._full_graphs()
-            return self._dijkstra(
-                bus_graph, walk_graph,
-                start_stop_id, start_time_sec, max_time_sec, track_path
-            )
-
-        center_lat = self.stop_coords.loc[center_stop_id, "stop_lat"]
-        center_lon = self.stop_coords.loc[center_stop_id, "stop_lon"]
-
-        def hav(lat1, lon1, lat2, lon2):
-            R = 6371000
-            dlat = radians(lat2 - lat1)
-            dlon = radians(lon2 - lon1)
-            a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
-            return R * 2 * atan2(sqrt(a), sqrt(1-a))
-
-        # エリア内のバス停を抽出
-        in_area_stops = []
-        for sid in self.stop_coords.index:
-            slat = self.stop_coords.loc[sid, "stop_lat"]
-            slon = self.stop_coords.loc[sid, "stop_lon"]
-            dist = hav(center_lat, center_lon, slat, slon)
-            if dist <= radius_m:
-                in_area_stops.append(sid)
-
-        # デマンドエッジを既存の徒歩エッジに追加（時刻非依存なので徒歩エッジ扱い）
-        import pandas as pd
-        demand_edges = []
-        for s1 in in_area_stops:
-            for s2 in in_area_stops:
-                if s1 != s2:
-                    demand_edges.append({
-                        "from_stop": s1,
-                        "to_stop": s2,
-                        "walk_time": demand_time_sec,
-                        "distance": 0,
-                        "type": "demand"
-                    })
-        demand_df = pd.DataFrame(demand_edges)
-        combined_walk = pd.concat([self.walk_edges, demand_df], ignore_index=True) if len(demand_edges) > 0 else self.walk_edges
-
-        bus_graph = self._full_bus_graph()
-        walk_graph = self._build_walk_graph(combined_walk)
-        return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
 
     def simulate_route_replacement(self, start_stop_id, start_time_sec, max_time_sec,

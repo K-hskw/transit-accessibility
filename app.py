@@ -192,6 +192,12 @@ if "result_stats" not in st.session_state:
 # ===== サイドバー =====
 st.sidebar.header("設定")
 
+# ダイヤ種別。交通空白は休日にこそ深刻になるため平日固定にしない。
+day_type = st.sidebar.radio("ダイヤ", engine.available_day_types, horizontal=True)
+engine.set_day_type(day_type)
+st.sidebar.caption(f"{day_type}ダイヤ: {engine.bus_edges['trip_id'].nunique()}便 / "
+                   f"{len(engine.bus_edges):,}エッジ")
+
 stop_names = engine.get_stop_names()
 
 start_stop_name = st.sidebar.selectbox(
@@ -208,7 +214,7 @@ start_time_sec = start_hour * 3600 + start_minute * 60
 max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30, 45, 60, 90], value=60)
 max_time_sec = max_time_min * 60
 
-mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加", "集客圏分析", "時間空白診断（3D）"])
+mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "代替路線追加", "集客圏分析", "時間空白診断（3D）"])
 remove_route_id = None
 selected_route_name = ""
 remove_stop_ids = []
@@ -294,15 +300,7 @@ elif mode == "減便":
 
 threshold_min = st.sidebar.slider("悪化閾値（分）", 1, 15, 1)
 
-if mode == "デマンド交通":
-    demand_center_name = st.sidebar.selectbox(
-        "デマンド交通の中心バス停", stop_names,
-        index=stop_names.index("東室蘭駅東口") if "東室蘭駅東口" in stop_names else 0
-    )
-    demand_radius_m = st.sidebar.slider("デマンド交通の対象エリア半径（m）", 500, 5000, 2000, step=500)
-    demand_time_min = st.sidebar.slider("エリア内移動の所要時間（分）", 5, 30, 15)
-
-elif mode == "代替路線追加":
+if mode == "代替路線追加":
     st.sidebar.markdown("**廃止する既存路線（任意）**")
     direct_routes, transfer_routes = engine.get_routes_grouped_by_access(start_stop_name)
     route_options_alt = {}
@@ -499,17 +497,6 @@ if st.sidebar.button("シミュレーション実行", type="primary"):
                         "all", reduce_ratio=reduce_ratio, track_path=True
                     )
                     sim_label = f"全路線一律 {int(reduce_ratio*100)}%削減"
-
-            elif mode == "デマンド交通":
-                demand_center_ids = engine.get_stop_ids_by_name(demand_center_name)
-                demand_center_id = demand_center_ids[0] if demand_center_ids else start_stop_id
-                result_after, prev_after = engine.simulate_demand_transit(
-                    start_stop_id, start_time_sec, max_time_sec,
-                    demand_center_id, radius_m=demand_radius_m,
-                    demand_time_sec=demand_time_min * 60, track_path=True
-                )
-                sim_label = f"デマンド交通: {demand_center_name}中心 {demand_radius_m}m圏 {demand_time_min}分"
-                remove_stop_ids = []
 
             elif mode == "代替路線追加":
                 alt_new_stop_ids = []
@@ -1012,6 +999,7 @@ if mode == "時間空白診断（3D）":
                 "max_time_min": max_time_min,
                 "walk_m": blank_walk_m,
                 "walk_speed": blank_walk_speed,
+                "day_type": day_type,
             }
 
         result = st.session_state.get("blank_result")
@@ -1019,9 +1007,13 @@ if mode == "時間空白診断（3D）":
             st.info("サイドバーの「空白診断を実行」を押してください。")
         else:
             st.caption(
-                f"拠点: {'、'.join(result['dest_names'])} ／ 制限 {result['max_time_min']}分 ／ "
+                f"{result.get('day_type', '?')}ダイヤ ／ 拠点: {'、'.join(result['dest_names'])} ／ "
+                f"制限 {result['max_time_min']}分 ／ "
                 f"徒歩 {result['walk_m']}m・{result['walk_speed']}m/分"
             )
+            if result.get("day_type") != day_type:
+                st.warning(f"表示中の結果は「{result.get('day_type')}ダイヤ」で計算したものです。"
+                           f"現在の設定（{day_type}）で見るには再実行してください。")
             sel_hour = st.slider("到着時刻（時）", min(result["hours"]), max(result["hours"]),
                                  min(9, max(result["hours"])))
             df_sel = result["per_hour"][sel_hour].copy()
