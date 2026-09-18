@@ -91,4 +91,17 @@ pip install -r requirements.txt
 python build_network.py
 streamlit run app.py
 
+時間空白の3Dマップ（docs/）
+「時間空白診断（3D）」モードと同じ計算結果を、Streamlit 無しで開ける1枚の
+HTMLとして docs/kuhaku-scope-muroran.html に置いています。各メッシュから
+生活拠点（既定：東室蘭駅東口）に制限時間内に着けない人口を、500mメッシュの
+3Dカラムで表示し、到着時刻とダイヤ（平日／土日祝）を切り替えられます。
+灰色の土台が静的空白（徒歩圏にバス停がない）、暖色の柱が時間空白（バス停は
+あるが時刻表の都合で間に合わない）です。
+
+再生成：
+bashpython tools/build_map3d.py
+外部依存は deck.gl（jsdelivr）と Google Fonts のみで、生成後はブラウザで
+直接開けます（地図タイルは使いません）。
+
 開発者：K-hskw 
