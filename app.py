@@ -1017,28 +1017,41 @@ if mode == "時間空白診断（3D）":
             sel_hour = st.slider("到着時刻（時）", min(result["hours"]), max(result["hours"]),
                                  min(9, max(result["hours"])))
             df_sel = result["per_hour"][sel_hour].copy()
-            df_sel["blank_hours"] = result["blank_hours"]
+            # 静的空白（徒歩圏にバス停なし）は終日空白になるのが当たり前なので、
+            # 深刻度（何時間帯で空白か）は静的でないメッシュだけで数える。
+            df_sel["blank_hours"] = np.where(df_sel["static_blank"], 0, result["blank_hours"])
+            df_sel["blank_pop"] = np.where(df_sel["reachable"], 0.0, df_sel["pop"])
+            df_sel["blank_elderly"] = np.where(df_sel["reachable"], 0.0, df_sel["elderly"])
+            df_sel["static_pop"] = np.where(df_sel["static_blank"], df_sel["pop"], 0.0)
 
+            n_hours = len(result["hours"])
             if blank_mesh_level == 500:
                 cells = aggregate_to_500m(df_sel)
-                radius = 250
+                key = df_sel["meshcode"].astype(str)
+                df_sel["_cell"] = (key.str[:8]
+                                   + (key.str[8].astype(int) // 5).astype(str)
+                                   + (key.str[9].astype(int) // 5).astype(str))
+                cells["static_pop"] = cells["cell"].map(
+                    df_sel.groupby("_cell")["static_pop"].sum()).fillna(0.0)
+                radius, inner = 250, 210
             else:
-                cells = df_sel.assign(
-                    blank_pop=np.where(df_sel["reachable"], 0.0, df_sel["pop"]),
-                    blank_elderly=np.where(df_sel["reachable"], 0.0, df_sel["elderly"]),
-                )
-                radius = 50
+                cells = df_sel
+                radius, inner = 50, 42
 
-            columns = cells[cells["blank_pop"] > 0].copy()
-            n_hours = len(result["hours"])
+            # 深刻度（1〜5）を暖色に対応させる。docs/ の単体版と同じ配色。
+            SEV = ["#F7D2B8", "#F0A575", "#E07440", "#BC4C22", "#7F2E14"]
+            def sev_rgb(h):
+                step = 1 if h <= 3 else 2 if h <= 7 else 3 if h <= 11 else 4 if h <= 15 else 5
+                c = SEV[step - 1].lstrip("#")
+                return [int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)]
 
-            # 色＝深刻度（空白になる時間帯の数）。黄 → 赤。
-            ratio = (columns["blank_hours"] / n_hours).clip(0, 1)
-            columns["r"] = 250
-            columns["g"] = ((1 - ratio) * 200).round().astype(int)
-            columns["b"] = ((1 - ratio) * 60).round().astype(int)
-            columns["blank_pop_disp"] = columns["blank_pop"].round().astype(int)
-            columns["blank_elderly_disp"] = columns["blank_elderly"].round().astype(int)
+            base = cells[cells["static_pop"] > 0].copy()          # 灰色の土台
+            base["static_disp"] = base["static_pop"].round().astype(int)
+            time_cells = cells[(cells["blank_pop"] - cells["static_pop"]) > 0].copy()  # 暖色の柱
+            time_cells[["r", "g", "b"]] = [sev_rgb(int(h)) for h in time_cells["blank_hours"]]
+            time_cells["blank_pop_disp"] = time_cells["blank_pop"].round().astype(int)
+            time_cells["blank_elderly_disp"] = time_cells["blank_elderly"].round().astype(int)
+            time_cells["time_disp"] = (time_cells["blank_pop"] - time_cells["static_pop"]).round().astype(int)
 
             total_pop = float(df_sel["pop"].sum())
             blank_pop = float(df_sel.loc[~df_sel["reachable"], "pop"].sum())
@@ -1057,28 +1070,34 @@ if mode == "時間空白診断（3D）":
                 longitude=float(df_sel["lon"].mean()),
                 zoom=11, pitch=50, bearing=0,
             )
-            layer = pdk.Layer(
+            # 灰色の土台（静的空白）の上に、時間空白の柱（暖色・深刻度で色分け）を重ねる
+            static_layer = pdk.Layer(
                 "ColumnLayer",
-                data=columns[["lon", "lat", "blank_pop", "blank_pop_disp",
-                              "blank_elderly_disp", "blank_hours", "r", "g", "b"]],
-                get_position=["lon", "lat"],
-                get_elevation="blank_pop",
-                elevation_scale=blank_elev_scale,
-                radius=radius,
-                get_fill_color=["r", "g", "b", 200],
-                pickable=True,
-                auto_highlight=True,
+                data=base[["lon", "lat", "static_pop", "static_disp"]],
+                get_position=["lon", "lat"], get_elevation="static_pop",
+                elevation_scale=blank_elev_scale, radius=radius,
+                get_fill_color=[174, 184, 194, 200], pickable=True, auto_highlight=True,
+            )
+            time_layer = pdk.Layer(
+                "ColumnLayer",
+                data=time_cells[["lon", "lat", "blank_pop", "blank_pop_disp",
+                                 "blank_elderly_disp", "time_disp", "blank_hours", "r", "g", "b"]],
+                get_position=["lon", "lat"], get_elevation="blank_pop",
+                elevation_scale=blank_elev_scale, radius=inner,
+                get_fill_color=["r", "g", "b", 220], pickable=True, auto_highlight=True,
             )
             st.pydeck_chart(pdk.Deck(
-                layers=[layer],
+                layers=[static_layer, time_layer],
                 initial_view_state=view,
                 map_style="light",
                 tooltip={"text": "空白人口 {blank_pop_disp}人\n"
+                                 "うち時間空白 {time_disp}人\n"
                                  "うち高齢者 {blank_elderly_disp}人\n"
-                                 "空白になる時間帯 {blank_hours}/" + str(n_hours)},
+                                 "時間空白になる時間帯 {blank_hours}/" + str(n_hours)},
             ))
 
-            st.caption("色: 黄＝一部の時間帯だけ空白 / 赤＝ほぼ終日空白")
+            st.caption("灰色の土台＝静的空白（徒歩圏にバス停なし） ／ "
+                       "暖色の柱＝時間空白。色が濃いほど多くの時間帯で着けない。")
 
             st.markdown("**時間帯別の空白人口**")
             hourly = pd.DataFrame({
