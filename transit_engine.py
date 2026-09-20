@@ -292,7 +292,10 @@ class TransitEngine:
             for i in range(len(filtered) - 1):
                 dep_sec = filtered[i]["departure_sec"]
                 arr_sec = filtered[i + 1]["arrival_sec"]
-                if arr_sec > dep_sec and filtered[i]["stop_id"] != filtered[i + 1]["stop_id"]:
+                # build_network と同じく、分単位GTFSで所要0分になる区間も残す。
+                # arr_sec > dep_sec（厳密）だと通過再接続のたびに0分区間が消え、
+                # 削除ゼロでも到達圏が壊れていた（212→91）。時刻逆転のみ除外する。
+                if arr_sec >= dep_sec and filtered[i]["stop_id"] != filtered[i + 1]["stop_id"]:
                     new_edges.append({
                         "from_stop": filtered[i]["stop_id"],
                         "to_stop": filtered[i + 1]["stop_id"],
