@@ -342,7 +342,11 @@ class TransitEngine:
                     neighbor_coords[sid_a][0], neighbor_coords[sid_a][1],
                     neighbor_coords[sid_b][0], neighbor_coords[sid_b][1]
                 )
-                if dist <= walk_distance * 2:
+                # UIで選ぶ徒歩圏（国交省ハンドブック基準の300m/500m）と同じ距離で
+                # 再接続する。以前は walk_distance*2（600m/1000m）で繋いでおり、
+                # 基準より緩い徒歩エッジを生んでいた。実測では到達数への影響は無いが、
+                # 説明可能性のため基準に揃える。
+                if dist <= walk_distance:
                     walk_time = max(1, int((dist / walk_speed) * 60))
                     new_walk_edges.append({
                         "from_stop": sid_a, "to_stop": sid_b,
