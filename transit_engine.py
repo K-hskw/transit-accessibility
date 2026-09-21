@@ -1,6 +1,7 @@
 ﻿import os
 import pandas as pd
 import heapq
+from contextlib import contextmanager
 from math import radians, sin, cos, sqrt, atan2
 
 from service_calendar import DAY_TYPES, available_day_types, trip_ids_for_day_type
@@ -75,6 +76,35 @@ class TransitEngine:
             self.all_bus_edges["trip_id"].isin(trip_ids)
         ].reset_index(drop=True)
         self.clear_graph_cache()
+
+    @contextmanager
+    def scenario(self, bus_edges=None, walk_edges=None):
+        """改変後のネットワークを一時的に適用する。
+
+        施策の効果を空白人口（逆方向到達圏ベース）で測るために使う。
+        simulate_* は起点1停留所からの前方到達圏しか返さないため、
+        edges_after_*() が返す改変後エッジをこれで適用してから
+        BlankAreaAnalyzer.diagnose() を呼ぶ。
+
+            before = analyzer.diagnose(dest, t, limit)
+            with engine.scenario(*engine.edges_after_route_removal(rid)):
+                after = analyzer.diagnose(dest, t, limit)
+
+        抜けると元のネットワークとグラフキャッシュに戻る。
+        この中で set_day_type を呼んではいけない（復帰時に上書きされる）。
+        """
+        saved = (self.bus_edges, self.walk_edges, self._bus_graph_cache,
+                 self._walk_graph_cache, self._rev_bus_graph_cache)
+        if bus_edges is not None:
+            self.bus_edges = bus_edges
+        if walk_edges is not None:
+            self.walk_edges = walk_edges
+        self.clear_graph_cache()
+        try:
+            yield self
+        finally:
+            (self.bus_edges, self.walk_edges, self._bus_graph_cache,
+             self._walk_graph_cache, self._rev_bus_graph_cache) = saved
 
     def _full_bus_graph(self):
         if self._bus_graph_cache is None:
@@ -255,16 +285,26 @@ class TransitEngine:
         bus_graph, walk_graph = self._full_graphs()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def simulate_route_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_route_id, track_path=False):
+    def edges_after_route_removal(self, remove_route_id):
+        """路線廃止後の (bus_edges, walk_edges) を返す。徒歩エッジは変わらない。"""
         if isinstance(remove_route_id, list):
             edges_after = self.bus_edges[~self.bus_edges["route_id"].isin(remove_route_id)]
         else:
             edges_after = self.bus_edges[self.bus_edges["route_id"] != remove_route_id]
+        return edges_after, self.walk_edges
+
+    def simulate_route_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_route_id, track_path=False):
+        edges_after, _ = self.edges_after_route_removal(remove_route_id)
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def simulate_stop_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_stop_ids, walk_distance=300, track_path=False):
+    def edges_after_stop_removal(self, remove_stop_ids, walk_distance=300):
+        """バス停削除後の (bus_edges, walk_edges) を返す。
+
+        削除バス停は通過扱い（前後を直通エッジで接続）とし、路線自体は維持する。
+        徒歩エッジは削除バス停ぶんを除き、その徒歩近隣どうしを繋ぎ直す。
+        """
         remove_set = set(remove_stop_ids)
 
         # === バスエッジ: 削除バス停を通過扱いにする ===
@@ -365,13 +405,17 @@ class TransitEngine:
         if new_walk_edges:
             walk_after = pd.concat([walk_after, pd.DataFrame(new_walk_edges)], ignore_index=True)
 
+        return edges_after, walk_after
+
+    def simulate_stop_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_stop_ids,
+                              walk_distance=300, track_path=False):
+        edges_after, walk_after = self.edges_after_stop_removal(remove_stop_ids, walk_distance)
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._build_walk_graph(walk_after)
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def simulate_frequency_reduction(self, start_stop_id, start_time_sec, max_time_sec,
-                                     reduce_mode, target_route_id=None, reduce_ratio=0.5,
-                                     track_path=False):
+    def edges_after_frequency_reduction(self, reduce_mode, target_route_id=None, reduce_ratio=0.5):
+        """減便後の (bus_edges, walk_edges) を返す。徒歩エッジは変わらない。"""
         if reduce_mode == "half":
             target_trips = self.bus_edges[self.bus_edges["route_id"] == target_route_id]["trip_id"].unique()
             keep_trips = target_trips[::2]
@@ -417,6 +461,12 @@ class TransitEngine:
         else:
             edges_after = self.bus_edges
 
+        return edges_after, self.walk_edges
+
+    def simulate_frequency_reduction(self, start_stop_id, start_time_sec, max_time_sec,
+                                     reduce_mode, target_route_id=None, reduce_ratio=0.5,
+                                     track_path=False):
+        edges_after, _ = self.edges_after_frequency_reduction(reduce_mode, target_route_id, reduce_ratio)
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
@@ -436,12 +486,14 @@ class TransitEngine:
         return lost, degraded
 
 
-    def simulate_route_replacement(self, start_stop_id, start_time_sec, max_time_sec,
-                                    remove_route_id, new_route_stops, interval_min=30,
-                                    speed_kmh=25, track_path=False):
-        """路線廃止＋代替路線追加シミュレーション
+    def edges_after_route_replacement(self, remove_route_id, new_route_stops,
+                                      interval_min=30, speed_kmh=25):
+        """路線廃止＋代替路線追加後の (bus_edges, walk_edges) を返す。
+
         remove_route_idを廃止し、new_route_stops（バス停IDのリスト）を結ぶ新路線を追加。
-        interval_min分間隔で運行、平均速度speed_kmhで所要時間を計算"""
+        interval_min分間隔で運行、平均速度speed_kmhで所要時間を計算。
+        徒歩エッジは変わらない。
+        """
         from math import radians, sin, cos, sqrt, atan2
         import pandas as pd
 
@@ -510,9 +562,17 @@ class TransitEngine:
             new_edges_df = pd.DataFrame(new_edges)
             edges_after = pd.concat([edges_after, new_edges_df], ignore_index=True)
 
+        return edges_after, self.walk_edges
+
+    def simulate_route_replacement(self, start_stop_id, start_time_sec, max_time_sec,
+                                   remove_route_id, new_route_stops, interval_min=30,
+                                   speed_kmh=25, track_path=False):
+        edges_after, _ = self.edges_after_route_replacement(
+            remove_route_id, new_route_stops, interval_min, speed_kmh)
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
+
     def calc_reverse_isochrone(self, dest_stop_id, arrival_time_sec, max_time_sec, track_path=False):
         """逆方向到達圏計算（集客圏分析）
         dest_stop_idにarrival_time_sec までに到達できる出発地点を計算する。
