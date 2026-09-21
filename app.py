@@ -385,7 +385,12 @@ def build_popup(stop_id, prev, start_time_sec, engine, prefix="", extra=""):
     return popup_text
 
 # ===== 計算実行 =====
-if st.sidebar.button("シミュレーション実行", type="primary"):
+# この実行ブロックが結果を作れるのは下の5モードだけ。他のモードは自前の
+# 実行ボタンを持っている。全モードでこのボタンを出していたため、対応しない
+# モードで押すと result_after が未定義のまま参照されてアプリが落ちていた。
+SIM_MODES = ("到達圏のみ", "路線廃止", "バス停削除", "減便", "代替路線追加")
+
+if mode in SIM_MODES and st.sidebar.button("シミュレーション実行", type="primary"):
     with st.spinner("計算中..."):
         result_before, prev_before = engine.calc_isochrone(
             start_stop_id, start_time_sec, max_time_sec, track_path=True
