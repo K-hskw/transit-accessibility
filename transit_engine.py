@@ -471,6 +471,106 @@ class TransitEngine:
         walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
+    # ===== 改善施策（処方） =====
+    # 核心が「時間空白」なので、処方も時間軸のもの（増便・ダイヤシフト）を中心に置く。
+    # 効果は engine.scenario() で適用して空白人口の前後差で測る。
+
+    def _trip_patterns(self, target_route_id):
+        """路線の便を停留所パターンごとにまとめる。
+
+        1つの路線に方向違い・経路違いが混在する（例: 鉄北北口線は4パターン）ため、
+        増便やダイヤシフトはパターン単位で扱わないと、行きの便を複製して
+        帰りの便として足すような不整合が起きる。
+        返り値: {(from停留所列, to停留所列): [(始発時刻, trip_id, エッジ群), ...]}（時刻順）
+        """
+        sub = self.bus_edges[self.bus_edges["route_id"] == target_route_id]
+        patterns = {}
+        for trip_id, g in sub.groupby("trip_id"):
+            g = g.sort_values("departure_sec")
+            key = (tuple(g["from_stop"]), tuple(g["to_stop"]))
+            patterns.setdefault(key, []).append((int(g["departure_sec"].min()), trip_id, g))
+        for key in patterns:
+            patterns[key].sort(key=lambda x: x[0])
+        return patterns
+
+    def _shifted_trip(self, edges_of_trip, new_dep_sec, new_trip_id):
+        """便のエッジ群を、始発時刻が new_dep_sec になるようずらして複製する"""
+        delta = int(new_dep_sec) - int(edges_of_trip["departure_sec"].min())
+        out = edges_of_trip.copy()
+        out["departure_sec"] = out["departure_sec"] + delta
+        out["arrival_sec"] = out["arrival_sec"] + delta
+        out["trip_id"] = new_trip_id
+        return out
+
+    def edges_after_frequency_increase(self, target_route_id, start_hour, end_hour, n_trips=1):
+        """指定時間帯を増便した (bus_edges, walk_edges) を返す。
+
+        停留所パターンごとに n_trips 便を時間帯内へ等間隔に挿入する。方向別に
+        足すので、パターンが2方向あれば実際の追加便数は 2×n_trips になる。
+        所要時間と停車パターンは、その時間帯に最も近い既存便をそのまま使う。
+
+        既存便の隙間を埋める方式にはしていない。空白が深刻な時間帯ほど既存便が
+        1本以下で隙間が定義できず、最も増便したい路線に限って増便できなくなるため。
+        """
+        lo, hi = start_hour * 3600, end_hour * 3600
+        added, n = [], 0
+        for trips in self._trip_patterns(target_route_id).values():
+            if not trips:
+                continue
+            # 時間帯内の便を雛形にする。無ければ時間帯に最も近い便で代用する
+            in_window = [t for t in trips if lo <= t[0] < hi]
+            template = in_window[0][2] if in_window else min(
+                trips, key=lambda t: min(abs(t[0] - lo), abs(t[0] - hi)))[2]
+            for i in range(n_trips):
+                n += 1
+                new_dep = lo + (hi - lo) * (i + 1) // (n_trips + 1)
+                added.append(self._shifted_trip(template, new_dep, f"ADD_{target_route_id}_{n}"))
+        if not added:
+            return self.bus_edges, self.walk_edges
+        return pd.concat([self.bus_edges] + added, ignore_index=True), self.walk_edges
+
+    def edges_after_timetable_shift(self, target_route_id, from_hours, to_hours, n_trips=1):
+        """便数を変えずに時間帯を移した (bus_edges, walk_edges) を返す（費用中立）。
+
+        from_hours=(開始,終了) に発車する便を、パターンごとに最大 n_trips 本
+        to_hours の時間帯へ移す。総便数・総走行距離は変わらないため、
+        「増便せずに時間帯を組み替えるだけで空白を減らせるか」を検証できる。
+        移す便は from_hours の遅い側から選ぶ（早朝側のサービスを残すため）。
+        """
+        lo_f, hi_f = from_hours[0] * 3600, from_hours[1] * 3600
+        lo_t, hi_t = to_hours[0] * 3600, to_hours[1] * 3600
+        removed_ids, added, n = set(), [], 0
+        for trips in self._trip_patterns(target_route_id).values():
+            in_window = [t for t in trips if lo_f <= t[0] < hi_f]
+            picked = in_window[-n_trips:] if n_trips > 0 else []
+            for i, (_dep, tid, g) in enumerate(picked):
+                n += 1
+                new_dep = lo_t + (hi_t - lo_t) * (i + 1) // (len(picked) + 1)
+                removed_ids.add(tid)
+                added.append(self._shifted_trip(g, new_dep, f"SHIFT_{target_route_id}_{n}"))
+        if not added:
+            return self.bus_edges, self.walk_edges
+        kept = self.bus_edges[~self.bus_edges["trip_id"].isin(removed_ids)]
+        return pd.concat([kept] + added, ignore_index=True), self.walk_edges
+
+    def route_length_km(self, route_id):
+        """路線の片道距離(km)。費用代理（便数×路線長）に使う。
+
+        停留所数が最も多い便の連続区間を実距離で足す。shapes.txt を使えば
+        道路形状に沿った距離になるが、費用の相対比較には停留所間直線距離で足りる。
+        """
+        patterns = self._trip_patterns(route_id)
+        if not patterns:
+            return 0.0
+        longest = max((t[2] for trips in patterns.values() for t in trips), key=len)
+        total = 0.0
+        for row in longest.itertuples(index=False):
+            if row.from_stop in self.stop_coords.index and row.to_stop in self.stop_coords.index:
+                a = self.stop_coords.loc[row.from_stop]
+                b = self.stop_coords.loc[row.to_stop]
+                total += haversine(a["stop_lat"], a["stop_lon"], b["stop_lat"], b["stop_lon"])
+        return total / 1000.0
+
     def compare_results(self, result_before, result_after, start_time_sec, threshold_min, remove_stop_ids=None):
         if remove_stop_ids is None:
             remove_stop_ids = []
