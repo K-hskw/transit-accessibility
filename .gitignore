@@ -15,3 +15,4 @@ simulate_*.py
 # 3Dマップ（意図して追跡する。上の *.html は作業用HTMLの除外）
 !docs/kuhaku-scope-muroran.html
 !tools/map3d_template.html
+!docs/進捗報告_20260921.html
