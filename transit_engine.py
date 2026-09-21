@@ -49,6 +49,7 @@ class TransitEngine:
         self._bus_graph_cache = None
         self._walk_graph_cache = None
         self._rev_bus_graph_cache = None
+        self._route_length_cache = {}
 
         self.set_day_type(day_type)
 
@@ -72,6 +73,7 @@ class TransitEngine:
 
         trip_ids = trip_ids_for_day_type(self.trips, self.calendar, day_type)
         self.day_type = day_type
+        self._route_length_cache = {}   # 種別により経路パターンが変わりうる
         self.bus_edges = self.all_bus_edges[
             self.all_bus_edges["trip_id"].isin(trip_ids)
         ].reset_index(drop=True)
@@ -558,9 +560,16 @@ class TransitEngine:
 
         停留所数が最も多い便の連続区間を実距離で足す。shapes.txt を使えば
         道路形状に沿った距離になるが、費用の相対比較には停留所間直線距離で足りる。
+
+        費用代理の算出で全路線ぶんを繰り返し呼ぶため結果をキャッシュする。
+        路線の経路はシナリオ（増便・ダイヤシフト）では変わらないので、
+        ダイヤ種別を切り替えたときだけ破棄すればよい。
         """
+        if route_id in self._route_length_cache:
+            return self._route_length_cache[route_id]
         patterns = self._trip_patterns(route_id)
         if not patterns:
+            self._route_length_cache[route_id] = 0.0
             return 0.0
         longest = max((t[2] for trips in patterns.values() for t in trips), key=len)
         total = 0.0
@@ -569,7 +578,8 @@ class TransitEngine:
                 a = self.stop_coords.loc[row.from_stop]
                 b = self.stop_coords.loc[row.to_stop]
                 total += haversine(a["stop_lat"], a["stop_lon"], b["stop_lat"], b["stop_lon"])
-        return total / 1000.0
+        self._route_length_cache[route_id] = total / 1000.0
+        return self._route_length_cache[route_id]
 
     def compare_results(self, result_before, result_after, start_time_sec, threshold_min, remove_stop_ids=None):
         if remove_stop_ids is None:
