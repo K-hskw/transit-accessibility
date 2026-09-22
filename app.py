@@ -14,8 +14,14 @@ from build_network import build_network
 from blank_area import BlankAreaAnalyzer, aggregate_to_500m
 from prescription import Plan, compare, rank_routes_by_blank_coverage
 
-st.set_page_config(page_title="公共交通アクセシビリティ分析", layout="wide")
-st.title("公共交通アクセシビリティ分析ツール")
+st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と処方", layout="wide")
+st.title("クウハクスコープ")
+st.caption(
+    "バス停からの距離ではなく、**時刻表**で交通空白を測ります。"
+    "同じ地点でも時間帯・曜日で到達できるかが変わり、距離基準ではそれが見えません。"
+    "室蘭市では休日7時に市の46%が拠点へ着けません。"
+    "左の「① 空白を診る → ② 壊れ方を試す → ③ 手を打つ」の順に進めます。"
+)
 
 # ===== データ管理 =====
 DATA_DIR = "."
@@ -190,7 +196,20 @@ if "result_stats" not in st.session_state:
     st.session_state.result_stats = None
 
 # ===== サイドバー =====
-# ===== サイドバー =====
+# モードを「診断 → 劣化 → 処方」の3段に整理する。10個を並列に並べると
+# 初見でどこから触ればよいか分からず、核心の時間空白診断が埋もれるため。
+STEPS = {
+    "① 空白を診る": ["時間空白診断（3D）", "時間帯別到達圏", "到達圏のみ",
+                   "集客圏分析", "施設アクセス"],
+    "② 壊れ方を試す": ["路線廃止", "減便", "バス停削除"],
+    "③ 手を打つ": ["処方（改善施策）", "代替路線追加"],
+}
+# 出発地点・出発時刻を使うのは「起点から出発する」モードだけ。
+# 時間空白診断と処方は拠点と到着時刻で考えるので、出しても効かない。
+ORIGIN_MODES = ("到達圏のみ", "路線廃止", "バス停削除", "減便",
+                "時間帯別到達圏", "施設アクセス", "代替路線追加")
+DEGRADE_MODES = ("路線廃止", "バス停削除", "減便", "代替路線追加")
+
 st.sidebar.header("設定")
 
 # ダイヤ種別。交通空白は休日にこそ深刻になるため平日固定にしない。
@@ -199,23 +218,31 @@ engine.set_day_type(day_type)
 st.sidebar.caption(f"{day_type}ダイヤ: {engine.bus_edges['trip_id'].nunique()}便 / "
                    f"{len(engine.bus_edges):,}エッジ")
 
+st.sidebar.divider()
+step = st.sidebar.radio("分析の流れ", list(STEPS))
+mode = st.sidebar.radio("分析の種類", STEPS[step])
+st.sidebar.divider()
+
 stop_names = engine.get_stop_names()
 
-start_stop_name = st.sidebar.selectbox(
-    "出発地点", stop_names,
-    index=stop_names.index("室蘭駅前") if "室蘭駅前" in stop_names else 0
-)
+if mode in ORIGIN_MODES:
+    start_stop_name = st.sidebar.selectbox(
+        "出発地点", stop_names,
+        index=stop_names.index("室蘭駅前") if "室蘭駅前" in stop_names else 0
+    )
+    start_hour = st.sidebar.slider("出発時刻（時）", 5, 22, 8)
+    start_minute = st.sidebar.slider("出発時刻（分）", 0, 55, 0, step=5)
+else:
+    # 起点を使わないモードでも、内部の共通処理が参照するので既定値を置く
+    start_stop_name = "室蘭駅前" if "室蘭駅前" in stop_names else stop_names[0]
+    start_hour, start_minute = 8, 0
+
 start_stop_ids = engine.get_stop_ids_by_name(start_stop_name)
 start_stop_id = start_stop_ids[0]
-
-start_hour = st.sidebar.slider("出発時刻（時）", 5, 22, 8)
-start_minute = st.sidebar.slider("出発時刻（分）", 0, 55, 0, step=5)
 start_time_sec = start_hour * 3600 + start_minute * 60
 
 max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30, 45, 60, 90], value=60)
 max_time_sec = max_time_min * 60
-
-mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "代替路線追加", "集客圏分析", "時間空白診断（3D）", "処方（改善施策）"])
 remove_route_id = None
 selected_route_name = ""
 remove_stop_ids = []
@@ -299,7 +326,11 @@ elif mode == "減便":
         reduce_pct = st.sidebar.slider("削減率（%）", 10, 80, 50, step=10)
         reduce_ratio = reduce_pct / 100
 
-threshold_min = st.sidebar.slider("悪化閾値（分）", 1, 15, 1)
+# 「何分悪化したら悪化と数えるか」は前後比較をする劣化モードでのみ意味がある
+if mode in DEGRADE_MODES:
+    threshold_min = st.sidebar.slider("悪化閾値（分）", 1, 15, 1)
+else:
+    threshold_min = 1
 
 if mode == "代替路線追加":
     st.sidebar.markdown("**廃止する既存路線（任意）**")
@@ -1005,15 +1036,14 @@ if mode == "時間空白診断（3D）":
     else:
         analyzer = load_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
 
-        if st.sidebar.button("空白診断を実行", type="primary"):
+        def run_blank_diagnosis():
             hours = list(range(5, 23))
-            with st.spinner("全時間帯の空白人口を計算中..."):
-                per_hour = {}
-                blank_hours = np.zeros(analyzer.n_mesh, dtype=int)
-                for h in hours:
-                    df_h = analyzer.diagnose(blank_dest_ids, h * 3600, max_time_sec)
-                    per_hour[h] = df_h
-                    blank_hours += (~df_h["reachable"]).to_numpy().astype(int)
+            per_hour = {}
+            blank_hours = np.zeros(analyzer.n_mesh, dtype=int)
+            for h in hours:
+                df_h = analyzer.diagnose(blank_dest_ids, h * 3600, max_time_sec)
+                per_hour[h] = df_h
+                blank_hours += (~df_h["reachable"]).to_numpy().astype(int)
             st.session_state.blank_result = {
                 "hours": hours,
                 "per_hour": per_hour,
@@ -1024,6 +1054,16 @@ if mode == "時間空白診断（3D）":
                 "walk_speed": blank_walk_speed,
                 "day_type": day_type,
             }
+
+        # 起動直後に核心の結果が出ている状態にする。空のフォームで待たせると、
+        # 短時間しか触らない相手には何のツールか伝わらない。全18時間帯で約2秒。
+        if "blank_result" not in st.session_state:
+            with st.spinner("全時間帯の空白人口を計算中..."):
+                run_blank_diagnosis()
+
+        if st.sidebar.button("この条件で再計算", type="primary"):
+            with st.spinner("全時間帯の空白人口を計算中..."):
+                run_blank_diagnosis()
 
         result = st.session_state.get("blank_result")
         if result is None:
