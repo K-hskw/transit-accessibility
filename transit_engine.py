@@ -1,7 +1,10 @@
-import os
+﻿import os
 import pandas as pd
 import heapq
+from contextlib import contextmanager
 from math import radians, sin, cos, sqrt, atan2
+
+from service_calendar import DAY_TYPES, available_day_types, trip_ids_for_day_type
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
@@ -12,21 +15,25 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 class TransitEngine:
-    def __init__(self, gtfs_dir="gtfs_data"):
+    def __init__(self, gtfs_dir="gtfs_data", day_type="平日"):
         self.stops = pd.read_csv(f"{gtfs_dir}/stops.txt")
         self.routes = pd.read_csv(f"{gtfs_dir}/routes.txt")
         self.trips = pd.read_csv(f"{gtfs_dir}/trips.txt")
         self.calendar = pd.read_csv(f"{gtfs_dir}/calendar.txt")
         # カスタムGTFSの場合は対応するエッジファイルを使用
         if gtfs_dir == "gtfs_data_custom" and os.path.exists("bus_edges_custom.csv"):
-            self.bus_edges = pd.read_csv("bus_edges_custom.csv")
+            self.all_bus_edges = pd.read_csv("bus_edges_custom.csv")
             self.walk_edges = pd.read_csv("walk_edges_custom.csv")
         else:
-            self.bus_edges = pd.read_csv("bus_edges.csv")
+            self.all_bus_edges = pd.read_csv("bus_edges.csv")
             self.walk_edges = pd.read_csv("walk_edges.csv")
 
         self.trip_to_route = self.trips.set_index("trip_id")["route_id"].to_dict()
-        self.bus_edges["route_id"] = self.bus_edges["trip_id"].map(self.trip_to_route)
+        self.all_bus_edges["route_id"] = self.all_bus_edges["trip_id"].map(self.trip_to_route)
+
+        # エッジは全ダイヤ分を持ち、bus_edges は選択中のダイヤ種別の絞り込み結果
+        self.available_day_types = available_day_types(self.trips, self.calendar)
+        self.day_type = None
 
         self.route_names = self.routes.set_index("route_id")["route_long_name"].to_dict()
         self.stop_coords = self.stops.set_index("stop_id")[["stop_lat", "stop_lon", "stop_name"]]
@@ -34,6 +41,86 @@ class TransitEngine:
         self.trip_to_route_name = {}
         for trip_id, route_id in self.trip_to_route.items():
             self.trip_to_route_name[trip_id] = self.route_names.get(route_id, "不明")
+
+        # 全ネットワークのグラフは何度も使い回すのでキャッシュする。
+        # 探索本体は一瞬で終わるが、グラフ構築が calc_isochrone 1回の
+        # 所要時間のほぼ全てを占めていた（時間帯別18回で約30秒）。
+        # bus_edges / walk_edges を差し替えた場合は clear_graph_cache() を呼ぶこと。
+        self._bus_graph_cache = None
+        self._walk_graph_cache = None
+        self._rev_bus_graph_cache = None
+        self._route_length_cache = {}
+
+        self.set_day_type(day_type)
+
+    def clear_graph_cache(self):
+        """bus_edges / walk_edges を差し替えたときにキャッシュを破棄する"""
+        self._bus_graph_cache = None
+        self._walk_graph_cache = None
+        self._rev_bus_graph_cache = None
+
+    def set_day_type(self, day_type):
+        """ダイヤ種別（平日/土曜/日祝）を切り替える
+
+        全便のエッジは all_bus_edges に保持し、bus_edges をその絞り込み結果に
+        差し替える。ネットワークを作り直す必要はないが、グラフのキャッシュは
+        中身が変わるので破棄する。
+        """
+        if day_type == self.day_type:
+            return
+        if day_type not in DAY_TYPES:
+            raise ValueError(f"未知のダイヤ種別: {day_type}（{DAY_TYPES} のいずれか）")
+
+        trip_ids = trip_ids_for_day_type(self.trips, self.calendar, day_type)
+        self.day_type = day_type
+        self._route_length_cache = {}   # 種別により経路パターンが変わりうる
+        self.bus_edges = self.all_bus_edges[
+            self.all_bus_edges["trip_id"].isin(trip_ids)
+        ].reset_index(drop=True)
+        self.clear_graph_cache()
+
+    @contextmanager
+    def scenario(self, bus_edges=None, walk_edges=None):
+        """改変後のネットワークを一時的に適用する。
+
+        施策の効果を空白人口（逆方向到達圏ベース）で測るために使う。
+        simulate_* は起点1停留所からの前方到達圏しか返さないため、
+        edges_after_*() が返す改変後エッジをこれで適用してから
+        BlankAreaAnalyzer.diagnose() を呼ぶ。
+
+            before = analyzer.diagnose(dest, t, limit)
+            with engine.scenario(*engine.edges_after_route_removal(rid)):
+                after = analyzer.diagnose(dest, t, limit)
+
+        抜けると元のネットワークとグラフキャッシュに戻る。
+        この中で set_day_type を呼んではいけない（復帰時に上書きされる）。
+        """
+        saved = (self.bus_edges, self.walk_edges, self._bus_graph_cache,
+                 self._walk_graph_cache, self._rev_bus_graph_cache)
+        if bus_edges is not None:
+            self.bus_edges = bus_edges
+        if walk_edges is not None:
+            self.walk_edges = walk_edges
+        self.clear_graph_cache()
+        try:
+            yield self
+        finally:
+            (self.bus_edges, self.walk_edges, self._bus_graph_cache,
+             self._walk_graph_cache, self._rev_bus_graph_cache) = saved
+
+    def _full_bus_graph(self):
+        if self._bus_graph_cache is None:
+            self._bus_graph_cache = self._build_bus_graph(self.bus_edges)
+        return self._bus_graph_cache
+
+    def _full_walk_graph(self):
+        if self._walk_graph_cache is None:
+            self._walk_graph_cache = self._build_walk_graph(self.walk_edges)
+        return self._walk_graph_cache
+
+    def _full_graphs(self):
+        """全ネットワークのバスグラフ・徒歩グラフ（キャッシュ付き）"""
+        return self._full_bus_graph(), self._full_walk_graph()
 
     def get_muroran_stops(self, lat_min=42.28, lat_max=42.42, lon_min=140.88, lon_max=141.05):
         mask = (
@@ -89,16 +176,14 @@ class TransitEngine:
         return direct_routes, transfer_routes
 
     def _build_bus_graph(self, edges_df):
+        # itertuples は iterrows の約10倍速い（3万行で1.4秒 -> 0.15秒）
         graph = {}
-        for _, row in edges_df.iterrows():
-            from_stop = row["from_stop"]
-            if from_stop not in graph:
-                graph[from_stop] = []
-            graph[from_stop].append((
-                int(row["departure_sec"]),
-                int(row["arrival_sec"]),
-                row["to_stop"],
-                row["trip_id"]
+        for row in edges_df.itertuples(index=False):
+            graph.setdefault(row.from_stop, []).append((
+                int(row.departure_sec),
+                int(row.arrival_sec),
+                row.to_stop,
+                row.trip_id
             ))
         for stop_id in graph:
             graph[stop_id].sort(key=lambda x: x[0])
@@ -106,11 +191,8 @@ class TransitEngine:
 
     def _build_walk_graph(self, walk_df):
         graph = {}
-        for _, row in walk_df.iterrows():
-            from_stop = row["from_stop"]
-            if from_stop not in graph:
-                graph[from_stop] = []
-            graph[from_stop].append((row["to_stop"], int(row["walk_time"])))
+        for row in walk_df.itertuples(index=False):
+            graph.setdefault(row.from_stop, []).append((row.to_stop, int(row.walk_time)))
         return graph
 
     def _sec_to_time(self, sec):
@@ -202,20 +284,29 @@ class TransitEngine:
         return path
 
     def calc_isochrone(self, start_stop_id, start_time_sec, max_time_sec, track_path=False):
-        bus_graph = self._build_bus_graph(self.bus_edges)
-        walk_graph = self._build_walk_graph(self.walk_edges)
+        bus_graph, walk_graph = self._full_graphs()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def simulate_route_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_route_id, track_path=False):
+    def edges_after_route_removal(self, remove_route_id):
+        """路線廃止後の (bus_edges, walk_edges) を返す。徒歩エッジは変わらない。"""
         if isinstance(remove_route_id, list):
             edges_after = self.bus_edges[~self.bus_edges["route_id"].isin(remove_route_id)]
         else:
             edges_after = self.bus_edges[self.bus_edges["route_id"] != remove_route_id]
+        return edges_after, self.walk_edges
+
+    def simulate_route_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_route_id, track_path=False):
+        edges_after, _ = self.edges_after_route_removal(remove_route_id)
         bus_graph = self._build_bus_graph(edges_after)
-        walk_graph = self._build_walk_graph(self.walk_edges)
+        walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def simulate_stop_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_stop_ids, walk_distance=300, track_path=False):
+    def edges_after_stop_removal(self, remove_stop_ids, walk_distance=300):
+        """バス停削除後の (bus_edges, walk_edges) を返す。
+
+        削除バス停は通過扱い（前後を直通エッジで接続）とし、路線自体は維持する。
+        徒歩エッジは削除バス停ぶんを除き、その徒歩近隣どうしを繋ぎ直す。
+        """
         remove_set = set(remove_stop_ids)
 
         # === バスエッジ: 削除バス停を通過扱いにする ===
@@ -243,7 +334,10 @@ class TransitEngine:
             for i in range(len(filtered) - 1):
                 dep_sec = filtered[i]["departure_sec"]
                 arr_sec = filtered[i + 1]["arrival_sec"]
-                if arr_sec > dep_sec and filtered[i]["stop_id"] != filtered[i + 1]["stop_id"]:
+                # build_network と同じく、分単位GTFSで所要0分になる区間も残す。
+                # arr_sec > dep_sec（厳密）だと通過再接続のたびに0分区間が消え、
+                # 削除ゼロでも到達圏が壊れていた（212→91）。時刻逆転のみ除外する。
+                if arr_sec >= dep_sec and filtered[i]["stop_id"] != filtered[i + 1]["stop_id"]:
                     new_edges.append({
                         "from_stop": filtered[i]["stop_id"],
                         "to_stop": filtered[i + 1]["stop_id"],
@@ -290,7 +384,11 @@ class TransitEngine:
                     neighbor_coords[sid_a][0], neighbor_coords[sid_a][1],
                     neighbor_coords[sid_b][0], neighbor_coords[sid_b][1]
                 )
-                if dist <= walk_distance * 2:
+                # UIで選ぶ徒歩圏（国交省ハンドブック基準の300m/500m）と同じ距離で
+                # 再接続する。以前は walk_distance*2（600m/1000m）で繋いでおり、
+                # 基準より緩い徒歩エッジを生んでいた。実測では到達数への影響は無いが、
+                # 説明可能性のため基準に揃える。
+                if dist <= walk_distance:
                     walk_time = max(1, int((dist / walk_speed) * 60))
                     new_walk_edges.append({
                         "from_stop": sid_a, "to_stop": sid_b,
@@ -309,13 +407,17 @@ class TransitEngine:
         if new_walk_edges:
             walk_after = pd.concat([walk_after, pd.DataFrame(new_walk_edges)], ignore_index=True)
 
+        return edges_after, walk_after
+
+    def simulate_stop_removal(self, start_stop_id, start_time_sec, max_time_sec, remove_stop_ids,
+                              walk_distance=300, track_path=False):
+        edges_after, walk_after = self.edges_after_stop_removal(remove_stop_ids, walk_distance)
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._build_walk_graph(walk_after)
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def simulate_frequency_reduction(self, start_stop_id, start_time_sec, max_time_sec,
-                                     reduce_mode, target_route_id=None, reduce_ratio=0.5,
-                                     track_path=False):
+    def edges_after_frequency_reduction(self, reduce_mode, target_route_id=None, reduce_ratio=0.5):
+        """減便後の (bus_edges, walk_edges) を返す。徒歩エッジは変わらない。"""
         if reduce_mode == "half":
             target_trips = self.bus_edges[self.bus_edges["route_id"] == target_route_id]["trip_id"].unique()
             keep_trips = target_trips[::2]
@@ -361,9 +463,123 @@ class TransitEngine:
         else:
             edges_after = self.bus_edges
 
+        return edges_after, self.walk_edges
+
+    def simulate_frequency_reduction(self, start_stop_id, start_time_sec, max_time_sec,
+                                     reduce_mode, target_route_id=None, reduce_ratio=0.5,
+                                     track_path=False):
+        edges_after, _ = self.edges_after_frequency_reduction(reduce_mode, target_route_id, reduce_ratio)
         bus_graph = self._build_bus_graph(edges_after)
-        walk_graph = self._build_walk_graph(self.walk_edges)
+        walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
+
+    # ===== 改善施策（処方） =====
+    # 核心が「時間空白」なので、処方も時間軸のもの（増便・ダイヤシフト）を中心に置く。
+    # 効果は engine.scenario() で適用して空白人口の前後差で測る。
+
+    def _trip_patterns(self, target_route_id):
+        """路線の便を停留所パターンごとにまとめる。
+
+        1つの路線に方向違い・経路違いが混在する（例: 鉄北北口線は4パターン）ため、
+        増便やダイヤシフトはパターン単位で扱わないと、行きの便を複製して
+        帰りの便として足すような不整合が起きる。
+        返り値: {(from停留所列, to停留所列): [(始発時刻, trip_id, エッジ群), ...]}（時刻順）
+        """
+        sub = self.bus_edges[self.bus_edges["route_id"] == target_route_id]
+        patterns = {}
+        for trip_id, g in sub.groupby("trip_id"):
+            g = g.sort_values("departure_sec")
+            key = (tuple(g["from_stop"]), tuple(g["to_stop"]))
+            patterns.setdefault(key, []).append((int(g["departure_sec"].min()), trip_id, g))
+        for key in patterns:
+            patterns[key].sort(key=lambda x: x[0])
+        return patterns
+
+    def _shifted_trip(self, edges_of_trip, new_dep_sec, new_trip_id):
+        """便のエッジ群を、始発時刻が new_dep_sec になるようずらして複製する"""
+        delta = int(new_dep_sec) - int(edges_of_trip["departure_sec"].min())
+        out = edges_of_trip.copy()
+        out["departure_sec"] = out["departure_sec"] + delta
+        out["arrival_sec"] = out["arrival_sec"] + delta
+        out["trip_id"] = new_trip_id
+        return out
+
+    def edges_after_frequency_increase(self, target_route_id, start_hour, end_hour, n_trips=1):
+        """指定時間帯を増便した (bus_edges, walk_edges) を返す。
+
+        停留所パターンごとに n_trips 便を時間帯内へ等間隔に挿入する。方向別に
+        足すので、パターンが2方向あれば実際の追加便数は 2×n_trips になる。
+        所要時間と停車パターンは、その時間帯に最も近い既存便をそのまま使う。
+
+        既存便の隙間を埋める方式にはしていない。空白が深刻な時間帯ほど既存便が
+        1本以下で隙間が定義できず、最も増便したい路線に限って増便できなくなるため。
+        """
+        lo, hi = start_hour * 3600, end_hour * 3600
+        added, n = [], 0
+        for trips in self._trip_patterns(target_route_id).values():
+            if not trips:
+                continue
+            # 時間帯内の便を雛形にする。無ければ時間帯に最も近い便で代用する
+            in_window = [t for t in trips if lo <= t[0] < hi]
+            template = in_window[0][2] if in_window else min(
+                trips, key=lambda t: min(abs(t[0] - lo), abs(t[0] - hi)))[2]
+            for i in range(n_trips):
+                n += 1
+                new_dep = lo + (hi - lo) * (i + 1) // (n_trips + 1)
+                added.append(self._shifted_trip(template, new_dep, f"ADD_{target_route_id}_{n}"))
+        if not added:
+            return self.bus_edges, self.walk_edges
+        return pd.concat([self.bus_edges] + added, ignore_index=True), self.walk_edges
+
+    def edges_after_timetable_shift(self, target_route_id, from_hours, to_hours, n_trips=1):
+        """便数を変えずに時間帯を移した (bus_edges, walk_edges) を返す（費用中立）。
+
+        from_hours=(開始,終了) に発車する便を、パターンごとに最大 n_trips 本
+        to_hours の時間帯へ移す。総便数・総走行距離は変わらないため、
+        「増便せずに時間帯を組み替えるだけで空白を減らせるか」を検証できる。
+        移す便は from_hours の遅い側から選ぶ（早朝側のサービスを残すため）。
+        """
+        lo_f, hi_f = from_hours[0] * 3600, from_hours[1] * 3600
+        lo_t, hi_t = to_hours[0] * 3600, to_hours[1] * 3600
+        removed_ids, added, n = set(), [], 0
+        for trips in self._trip_patterns(target_route_id).values():
+            in_window = [t for t in trips if lo_f <= t[0] < hi_f]
+            picked = in_window[-n_trips:] if n_trips > 0 else []
+            for i, (_dep, tid, g) in enumerate(picked):
+                n += 1
+                new_dep = lo_t + (hi_t - lo_t) * (i + 1) // (len(picked) + 1)
+                removed_ids.add(tid)
+                added.append(self._shifted_trip(g, new_dep, f"SHIFT_{target_route_id}_{n}"))
+        if not added:
+            return self.bus_edges, self.walk_edges
+        kept = self.bus_edges[~self.bus_edges["trip_id"].isin(removed_ids)]
+        return pd.concat([kept] + added, ignore_index=True), self.walk_edges
+
+    def route_length_km(self, route_id):
+        """路線の片道距離(km)。費用代理（便数×路線長）に使う。
+
+        停留所数が最も多い便の連続区間を実距離で足す。shapes.txt を使えば
+        道路形状に沿った距離になるが、費用の相対比較には停留所間直線距離で足りる。
+
+        費用代理の算出で全路線ぶんを繰り返し呼ぶため結果をキャッシュする。
+        路線の経路はシナリオ（増便・ダイヤシフト）では変わらないので、
+        ダイヤ種別を切り替えたときだけ破棄すればよい。
+        """
+        if route_id in self._route_length_cache:
+            return self._route_length_cache[route_id]
+        patterns = self._trip_patterns(route_id)
+        if not patterns:
+            self._route_length_cache[route_id] = 0.0
+            return 0.0
+        longest = max((t[2] for trips in patterns.values() for t in trips), key=len)
+        total = 0.0
+        for row in longest.itertuples(index=False):
+            if row.from_stop in self.stop_coords.index and row.to_stop in self.stop_coords.index:
+                a = self.stop_coords.loc[row.from_stop]
+                b = self.stop_coords.loc[row.to_stop]
+                total += haversine(a["stop_lat"], a["stop_lon"], b["stop_lat"], b["stop_lon"])
+        self._route_length_cache[route_id] = total / 1000.0
+        return self._route_length_cache[route_id]
 
     def compare_results(self, result_before, result_after, start_time_sec, threshold_min, remove_stop_ids=None):
         if remove_stop_ids is None:
@@ -379,66 +595,15 @@ class TransitEngine:
                     degraded[stop_id] = diff
         return lost, degraded
 
-    def simulate_demand_transit(self, start_stop_id, start_time_sec, max_time_sec,
-                                    center_stop_id, radius_m=2000, demand_time_sec=900,
-                                    track_path=False):
-        """デマンド交通シミュレーション
-        center_stop_idを中心に半径radius_m以内のバス停間を、demand_time_sec秒で移動可能とする"""
-        from math import radians, sin, cos, sqrt, atan2
 
-        if center_stop_id not in self.stop_coords.index:
-            return self._dijkstra(
-                self._build_bus_graph(self.bus_edges),
-                self._build_walk_graph(self.walk_edges),
-                start_stop_id, start_time_sec, max_time_sec, track_path
-            )
+    def edges_after_route_replacement(self, remove_route_id, new_route_stops,
+                                      interval_min=30, speed_kmh=25):
+        """路線廃止＋代替路線追加後の (bus_edges, walk_edges) を返す。
 
-        center_lat = self.stop_coords.loc[center_stop_id, "stop_lat"]
-        center_lon = self.stop_coords.loc[center_stop_id, "stop_lon"]
-
-        def hav(lat1, lon1, lat2, lon2):
-            R = 6371000
-            dlat = radians(lat2 - lat1)
-            dlon = radians(lon2 - lon1)
-            a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
-            return R * 2 * atan2(sqrt(a), sqrt(1-a))
-
-        # エリア内のバス停を抽出
-        in_area_stops = []
-        for sid in self.stop_coords.index:
-            slat = self.stop_coords.loc[sid, "stop_lat"]
-            slon = self.stop_coords.loc[sid, "stop_lon"]
-            dist = hav(center_lat, center_lon, slat, slon)
-            if dist <= radius_m:
-                in_area_stops.append(sid)
-
-        # デマンドエッジを既存の徒歩エッジに追加（時刻非依存なので徒歩エッジ扱い）
-        import pandas as pd
-        demand_edges = []
-        for s1 in in_area_stops:
-            for s2 in in_area_stops:
-                if s1 != s2:
-                    demand_edges.append({
-                        "from_stop": s1,
-                        "to_stop": s2,
-                        "walk_time": demand_time_sec,
-                        "distance": 0,
-                        "type": "demand"
-                    })
-        demand_df = pd.DataFrame(demand_edges)
-        combined_walk = pd.concat([self.walk_edges, demand_df], ignore_index=True) if len(demand_edges) > 0 else self.walk_edges
-
-        bus_graph = self._build_bus_graph(self.bus_edges)
-        walk_graph = self._build_walk_graph(combined_walk)
-        return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
-
-
-    def simulate_route_replacement(self, start_stop_id, start_time_sec, max_time_sec,
-                                    remove_route_id, new_route_stops, interval_min=30,
-                                    speed_kmh=25, track_path=False):
-        """路線廃止＋代替路線追加シミュレーション
         remove_route_idを廃止し、new_route_stops（バス停IDのリスト）を結ぶ新路線を追加。
-        interval_min分間隔で運行、平均速度speed_kmhで所要時間を計算"""
+        interval_min分間隔で運行、平均速度speed_kmhで所要時間を計算。
+        徒歩エッジは変わらない。
+        """
         from math import radians, sin, cos, sqrt, atan2
         import pandas as pd
 
@@ -507,9 +672,17 @@ class TransitEngine:
             new_edges_df = pd.DataFrame(new_edges)
             edges_after = pd.concat([edges_after, new_edges_df], ignore_index=True)
 
+        return edges_after, self.walk_edges
+
+    def simulate_route_replacement(self, start_stop_id, start_time_sec, max_time_sec,
+                                   remove_route_id, new_route_stops, interval_min=30,
+                                   speed_kmh=25, track_path=False):
+        edges_after, _ = self.edges_after_route_replacement(
+            remove_route_id, new_route_stops, interval_min, speed_kmh)
         bus_graph = self._build_bus_graph(edges_after)
-        walk_graph = self._build_walk_graph(self.walk_edges)
+        walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
+
     def calc_reverse_isochrone(self, dest_stop_id, arrival_time_sec, max_time_sec, track_path=False):
         """逆方向到達圏計算（集客圏分析）
         dest_stop_idにarrival_time_sec までに到達できる出発地点を計算する。
@@ -517,39 +690,44 @@ class TransitEngine:
         """
         import heapq
 
-        # 逆向きバスグラフの構築
+        # 逆向きバスグラフの構築（キャッシュ付き）
         # 通常: from_stop -> (dep_sec, arr_sec, to_stop, trip_id)
         # 逆向き: to_stop -> (arr_sec, dep_sec, from_stop, trip_id)
-        rev_bus_graph = {}
-        for _, row in self.bus_edges.iterrows():
-            to_stop = row["to_stop"]
-            from_stop = row["from_stop"]
-            dep_sec = int(row["departure_sec"])
-            arr_sec = int(row["arrival_sec"])
-            trip_id = row["trip_id"]
-            if to_stop not in rev_bus_graph:
-                rev_bus_graph[to_stop] = []
-            rev_bus_graph[to_stop].append((arr_sec, dep_sec, from_stop, trip_id))
+        if self._rev_bus_graph_cache is None:
+            rev_bus_graph = {}
+            for row in self.bus_edges.itertuples(index=False):
+                rev_bus_graph.setdefault(row.to_stop, []).append((
+                    int(row.arrival_sec),
+                    int(row.departure_sec),
+                    row.from_stop,
+                    row.trip_id
+                ))
+            self._rev_bus_graph_cache = rev_bus_graph
+        rev_bus_graph = self._rev_bus_graph_cache
 
         # 徒歩グラフはそのまま使用（無向グラフなので逆向きも同じ）
-        walk_graph = self._build_walk_graph(self.walk_edges)
+        walk_graph = self._full_walk_graph()
 
         # 逆向きダイクストラ
         # best_departure[stop] = そのバス停から出発できる最遅の出発時刻
+        # 順方向 _dijkstra と同じく (停留所, 直前の移動手段) を状態に持ち、
+        # 徒歩の連続を禁止する。これが無いと300m徒歩エッジを無制限に連鎖でき、
+        # 集客圏が順方向到達圏より過大になる（室蘭で18%過大だった）。
         earliest_time = arrival_time_sec - max_time_sec
         best_departure = {dest_stop_id: arrival_time_sec}
-        # キューは (-departure_time, stop) で最遅出発時刻を優先
-        queue = [(-arrival_time_sec, dest_stop_id)]
+        best_state = {(dest_stop_id, "start"): arrival_time_sec}
+        # キューは (-departure_time, stop, mode) で最遅出発時刻を優先
+        queue = [(-arrival_time_sec, dest_stop_id, "start")]
 
         prev = {}
         if track_path:
             prev[dest_stop_id] = None
 
         while queue:
-            neg_time, current_stop = heapq.heappop(queue)
+            neg_time, current_stop, last_mode = heapq.heappop(queue)
             current_time = -neg_time
 
-            if current_time < best_departure.get(current_stop, float("-inf")):
+            if current_time < best_state.get((current_stop, last_mode), float("-inf")):
                 continue
 
             # 逆向きバスエッジを辿る
@@ -557,22 +735,28 @@ class TransitEngine:
                 for arr_sec, dep_sec, from_stop, trip_id in rev_bus_graph[current_stop]:
                     # このバスはcurrent_timeまでに到着し、earliest_time以降に出発する
                     if arr_sec <= current_time and dep_sec >= earliest_time:
-                        if dep_sec > best_departure.get(from_stop, float("-inf")):
-                            best_departure[from_stop] = dep_sec
-                            if track_path:
-                                prev[from_stop] = (current_stop, trip_id, dep_sec, arr_sec)
-                            heapq.heappush(queue, (-dep_sec, from_stop))
+                        new_state = (from_stop, "bus")
+                        if dep_sec > best_state.get(new_state, float("-inf")):
+                            best_state[new_state] = dep_sec
+                            if dep_sec > best_departure.get(from_stop, float("-inf")):
+                                best_departure[from_stop] = dep_sec
+                                if track_path:
+                                    prev[from_stop] = (current_stop, trip_id, dep_sec, arr_sec)
+                            heapq.heappush(queue, (-dep_sec, from_stop, "bus"))
 
-            # 徒歩エッジを逆向きに辿る
-            if current_stop in walk_graph:
+            # 徒歩エッジを逆向きに辿る（直前も徒歩なら辿らない）
+            if last_mode != "walk" and current_stop in walk_graph:
                 for to_stop, walk_time in walk_graph[current_stop]:
                     dep_time = current_time - walk_time
                     if dep_time >= earliest_time:
-                        if dep_time > best_departure.get(to_stop, float("-inf")):
-                            best_departure[to_stop] = dep_time
-                            if track_path:
-                                prev[to_stop] = (current_stop, "walk", dep_time, current_time)
-                            heapq.heappush(queue, (-dep_time, to_stop))
+                        new_state = (to_stop, "walk")
+                        if dep_time > best_state.get(new_state, float("-inf")):
+                            best_state[new_state] = dep_time
+                            if dep_time > best_departure.get(to_stop, float("-inf")):
+                                best_departure[to_stop] = dep_time
+                                if track_path:
+                                    prev[to_stop] = (current_stop, "walk", dep_time, current_time)
+                            heapq.heappush(queue, (-dep_time, to_stop, "walk"))
 
         if track_path:
             return best_departure, prev

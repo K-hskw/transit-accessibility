@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>クウハクスコープ 開発進捗報告</title>
+<style>
+@page { size: A4; margin: 18mm 16mm 16mm 16mm; }
+:root{
+  --ink:#16202b; --muted:#5a6673; --faint:#8c97a3; --line:#d7dee5;
+  --accent:#1f5f8b; --bad:#a8341c; --good:#1d6b4f; --panel:#f5f7f9;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; color:var(--ink); background:#fff;
+  font-family:"Yu Gothic","Meiryo","Hiragino Sans",sans-serif;
+  font-size:9.6pt; line-height:1.65;
+}
+h1{font-size:19pt;margin:0 0 2mm;letter-spacing:.01em}
+.sub{color:var(--muted);font-size:10pt;margin:0 0 1mm}
+.meta{color:var(--faint);font-size:8.4pt;margin:0}
+header{border-bottom:2px solid var(--accent);padding-bottom:4mm;margin-bottom:6mm}
+h2{font-size:12.5pt;margin:7mm 0 2.5mm;padding-left:2.5mm;border-left:3.5px solid var(--accent)}
+h2:first-of-type{margin-top:0}
+h3{font-size:10.4pt;margin:4.5mm 0 1.5mm;color:var(--accent)}
+p{margin:0 0 2mm}
+ul{margin:0 0 2.5mm;padding-left:5mm}
+li{margin-bottom:.9mm}
+table{border-collapse:collapse;width:100%;margin:2mm 0 3mm;font-size:8.8pt}
+th,td{border-bottom:1px solid var(--line);padding:1.5mm 2mm;text-align:right}
+th{background:var(--panel);color:var(--muted);font-weight:600;text-align:right;border-bottom:1.5px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+td.num{font-variant-numeric:tabular-nums}
+.good{color:var(--good);font-weight:600}
+.bad{color:var(--bad);font-weight:600}
+.box{background:var(--panel);border-left:3px solid var(--accent);padding:2.5mm 3mm;margin:2.5mm 0}
+.box.warn{border-left-color:var(--bad)}
+.box p:last-child{margin-bottom:0}
+.k{font-weight:600}
+.caption{color:var(--muted);font-size:8.2pt;margin:-1mm 0 3mm}
+code{font-family:"Consolas","Courier New",monospace;font-size:8.6pt;background:var(--panel);padding:.3mm 1mm;border-radius:2px}
+.cols{display:flex;gap:5mm}
+.cols>div{flex:1}
+.pagebreak{page-break-before:always}
+footer{margin-top:7mm;padding-top:2.5mm;border-top:1px solid var(--line);color:var(--faint);font-size:8pt}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>クウハクスコープ 開発進捗報告</h1>
+  <p class="sub">公共交通オープンデータチャレンジ2026 応募作品／transit-accessibility 拡張</p>
+  <p class="meta">2026-09-21 ／ ブランチ <code>fix/network-and-isochrone</code>（12コミット、push済） ／ 対象: 室蘭市・道南バス GTFS-JP</p>
+</header>
+
+<h2>1. 要約</h2>
+<p>本期間の作業は大きく3つ。<span class="k">(1) 計算基盤の重大なバグ修正</span>、<span class="k">(2) 核心機能「時間空白診断」の実装</span>、<span class="k">(3) 処方（改善施策）モジュールの新設</span>。
+とくに(1)では、発表・面接で使う予定だった数値が壊れたネットワーク上のものであることが判明し、全て再計算した。</p>
+
+<div class="box">
+  <p><span class="k">最も重要な変更:</span> ネットワーク構築が所要0分の区間を捨てており、148停留所（すずらん団地・みどり団地など）がモデル上バスで永久に到達不能になっていた。修正により到達停留所数が時間帯により2〜8倍変化し、主要な分析結果がすべて変わった。</p>
+</div>
+
+<h2>2. 修正した計算バグ</h2>
+
+<h3>2.1 ネットワーク構築の区間欠落（最重要）</h3>
+<p><code>build_network.py</code> が <code>travel_time &gt; 0</code> の区間しか採用していなかった。GTFS-JPの時刻は分単位のため、近接停留所間は所要0分になる。</p>
+<table>
+  <tr><th>項目</th><th>値</th></tr>
+  <tr><td>平日ダイヤの全区間</td><td class="num">115,415</td></tr>
+  <tr><td>所要0分として除外されていた区間</td><td class="num">9,760（8.46%）</td></tr>
+  <tr><td>影響を受けた便</td><td class="num">1,833 / 2,837便</td></tr>
+  <tr><td>モデル上バスで到達不能だった停留所</td><td class="num bad">148箇所 → 0箇所</td></tr>
+</table>
+<p class="caption">時刻表の時刻は絶対値なので、0秒エッジを残しても誤差は停留所あたり1分未満で、便の総所要時間には累積しない。時刻逆転（負値）は0件だった。</p>
+
+<h3>2.2 バス停削除シミュレーションの同種バグ</h3>
+<p>同じ欠陥が削除ロジック内部にも残っていた。<span class="k">何も削除しなくても到達圏が 212 → 91 に壊れる</span>状態で、削除の影響を大きく過大評価していた。修正後、東室蘭駅東口の削除による到達不能は 132箇所 → 2箇所（当該停留所のみ）となり、「主要ハブ削除で24箇所が孤立」という従来の知見は成立しなくなった。</p>
+
+<h3>2.3 逆方向到達圏（集客圏）の徒歩連続</h3>
+<p>順方向にある「徒歩の連続禁止」が逆方向に無く、300m徒歩エッジを無制限に連鎖できていた。集客圏が18.2%過大（280→229停留所）。両者で移動ルールが異なると前後比較が成立しないため修正。</p>
+
+<h2>3. 更新した分析結果</h2>
+<p>修正後ネットワーク・平日ダイヤ・室蘭駅前起点・制限60分での実測値。</p>
+<table>
+  <tr><th>知見</th><th>従来（誤）</th><th>修正後</th></tr>
+  <tr><td>時間帯格差</td><td class="num">13.2倍</td><td class="num good">27.6倍（5時台11 / 10時台304）</td></tr>
+  <tr><td>路線廃止の非対称性</td><td class="num">42路線中5</td><td class="num">102路線中5</td></tr>
+  <tr><td>減便30%→40%</td><td class="num">14 → 60箇所（急増）</td><td class="num">76 → 109箇所（段階的）</td></tr>
+  <tr><td>主要ハブ削除</td><td class="num">24箇所が孤立</td><td class="num">2箇所のみ（冗長性あり）</td></tr>
+</table>
+<div class="box">
+  <p><span class="k">差別化の主張が強化された。</span>設計更新メモの「同じ地点でも時間帯で到達可能性が13倍変わる」は <span class="k">27.6倍</span> に更新できる。一方、減便の非線形性とハブの重要性は従来ほど鮮やかな結果ではなくなった。</p>
+</div>
+
+<h2>4. 新機能</h2>
+
+<h3>4.1 時間空白診断（核心）</h3>
+<p>空白人口の定義を「1つのバス停からの到達圏」から<span class="k">「各メッシュから生活拠点に制限時間内に着けるか」</span>へ変更。この向きなら拠点1つ・時間帯1つあたり逆方向ダイクストラ1回で全メッシュの判定が出るため、全メッシュを起点にする必要がない。3,079メッシュ×17時間帯の集計が0.10秒。</p>
+<p>メッシュ重心→最寄りバス停（500m以内）の徒歩区間を新設。従来はバス停間300mの徒歩エッジのみで「そもそもバス停まで歩けるか」が評価されていなかった。徒歩圏にバス停が無いメッシュは<span class="k">静的空白</span>として、時刻表由来の<span class="k">時間空白</span>と区別する。</p>
+
+<h3>4.2 土日祝ダイヤ対応</h3>
+<p><code>calendar.txt</code> の <code>monday==1</code> のみを見ており平日しか扱えなかった。交通空白は休日にこそ深刻なのに測れていなかった。平日806便／土曜674便／日祝670便。</p>
+
+<h3>4.3 3Dカラム可視化</h3>
+<p>500mメッシュごとに柱を立て、高さ＝空白人口、色＝18時間帯のうち何時間帯で空白になるか。到着時刻スライダーで柱が伸縮する。Streamlit 無しで開ける単体HTML版を <code>docs/</code> に同梱。</p>
+<p class="caption">設計メモは250mメッシュを想定していたが、100mメッシュは1kmの10等分のため250mには整数で割り切れない。標準メッシュ体系で作れる500m（5×5セル）を採用した。</p>
+
+<div class="pagebreak"></div>
+
+<h2>5. 休日の朝という発見</h2>
+<p>ダイヤ別に空白人口を測ったところ、曜日という新しい軸が現れた。拠点＝東室蘭駅東口、60分以内。</p>
+<table>
+  <tr><th>到着時刻</th><th>平日</th><th>土日祝</th></tr>
+  <tr><td>7時着</td><td class="num">21,195</td><td class="num bad">38,322（市の46.1%）</td></tr>
+  <tr><td>9時着</td><td class="num">19,867</td><td class="num">13,825</td></tr>
+  <tr><td>12時着</td><td class="num">20,488</td><td class="num">20,326</td></tr>
+  <tr><td>17時着</td><td class="num">24,245</td><td class="num">26,417</td></tr>
+</table>
+<p><span class="k">休日の朝は市の46%が拠点に着けない。</span>一方、日中はむしろ休日のほうが良い。平日と土日は互いに素な時刻表なので、どちらが広いかは時間帯で入れ替わる。</p>
+<div class="box warn">
+  <p><span class="k">当初の仮説は誤りだった。</span>「休日は常に空白が多い」と想定してテストを書いたが、9時台では逆転していた。決め打ちの大小比較を捨て、代わりに「便を増やせば到達範囲は広がる」という単調性（土曜+平日 ⊇ 各々）をテストに据えた。</p>
+</div>
+
+<h2>6. 処方（改善施策）モジュール</h2>
+<p>診断に対し「何をすれば埋まるか」を同じ指標で答える。核心が時間空白なので、処方も時間軸のもの（増便・ダイヤシフト）を中心に置いた。</p>
+<p class="caption">補足: 「代替路線をどこに引くか」「停留所をどこに新設するか」は空間軸の処方で、2025年優秀賞「コミバスをつくろう！」と正面から競合する。診断で時間空白を示しながら処方が空間軸では、主張の軸がずれる。</p>
+
+<h3>6.1 基盤の refactor</h3>
+<p>従来 <code>simulate_*</code> は改変エッジを内部で作った直後に前方ダイクストラを回し、起点1停留所からの到達圏しか返さなかった。空白人口は逆方向到達圏で計算するため、<span class="k">施策の効果を核心指標で測れなかった</span>。改変後エッジを返す関数に分離し、<code>engine.scenario()</code> で一時適用できるようにした。</p>
+
+<h3>6.2 結果（休日7時着・基準38,322人）</h3>
+<table>
+  <tr><th>施策</th><th>7時の削減</th><th>全日の削減</th><th>追加便</th><th>運行キロ増</th></tr>
+  <tr><td>増便 選んだ3路線すべて</td><td class="num">0</td><td class="num good">10,595</td><td class="num">12</td><td class="num">247.6</td></tr>
+  <tr><td>増便 10絵鞆・工大線</td><td class="num">0</td><td class="num good">8,847</td><td class="num">1</td><td class="num">20.3</td></tr>
+  <tr><td>シフト 八丁平すずかけ線</td><td class="num">8,214</td><td class="num">4,773</td><td class="num">0</td><td class="num">0.0</td></tr>
+  <tr><td>シフト 絵鞆循環線</td><td class="num">0</td><td class="num bad">−1,719（悪化）</td><td class="num">0</td><td class="num">0.0</td></tr>
+</table>
+
+<h3>6.3 分かった3つのこと</h3>
+<ul>
+  <li><span class="k">便数で対象路線を選ぶと完全に外れる。</span>最多便の鉄北北口線は129停留所を通るが空白地域は0箇所で、増便しても1人も減らない。効くのは便数の少ないローカル線。空白地域の停留所数で候補を自動順位づけする機能を追加した。</li>
+  <li><span class="k">最も効率的なのは1便追加。</span>10絵鞆・工大線は休日に1便しか走っておらず、1便足すだけで全日の延べ空白が8,847人減る（20.3km）。ただしこれは当該路線の特殊事情で、一般化はできない。</li>
+  <li><span class="k">全日で評価しないと危険。</span>当初7時着のみで評価し、ダイヤシフトが「費用ゼロで8,214人改善」と出た。全日で見ると13時・15時が悪化して実質4,773人減。絵鞆循環線のシフトに至っては7時の改善がゼロで全日1,719人の純悪化なのに、単一時刻では「効果0」と無害に見えていた。評価を全18時間帯に変更した。</li>
+</ul>
+<p class="caption">費用は実額が不明なため「運行キロ＝便数×路線長」を代理値とした。バス事業のコストは慣例的に円/実車走行キロで表され補助金算定も走行キロ基準のため、後から単価を掛ければ金額になる。路線長は停留所間の直線距離の和で、実道路距離より短めに出る（shapes.txt は未使用）。</p>
+
+<h2>7. 性能</h2>
+<table>
+  <tr><th>処理</th><th>修正前</th><th>修正後</th></tr>
+  <tr><td>時間帯別到達圏（18回）</td><td class="num">約30秒</td><td class="num good">0.02秒</td></tr>
+  <tr><td>人口計算（60停留所）</td><td class="num">5.24秒</td><td class="num good">0.011秒</td></tr>
+  <tr><td>施策比較（4施策）</td><td class="num">6.43秒</td><td class="num good">1.50秒</td></tr>
+</table>
+<p class="caption">探索本体ではなくグラフ構築が所要時間のほぼ全てを占めていた。キャッシュ化と iterrows→itertuples／numpy ベクトル化による。人口計算は結果が完全一致することを確認済み。</p>
+
+<h2>8. 品質</h2>
+<p>テスト 975件すべて合格（内訳: 473 / 137 / 286 / 24 / 13 / 17 / 25）。新規に <code>test_blank_area</code>、<code>test_day_type</code>、<code>test_scenario</code>、<code>test_prescription</code> を追加。</p>
+<ul>
+  <li><code>edges_after_*</code> と <code>simulate_*</code> の結果一致を検証しており、片方だけ直してずれる事故を検出できる。</li>
+  <li>既知の失敗だった「全路線同時廃止」テストは、高速バスを除外した路線一覧だけを廃止していたテスト側の不具合だったため修正。</li>
+</ul>
+
+<h2>9. 限界と残作業</h2>
+<ul>
+  <li><span class="k">勾配（DEM）は未着手。</span>徒歩速度を一律に落として効果の上限を測ったところ、半減（Tobler式で S=+0.20 相当）でも空白人口は+9.1%にとどまった。全メッシュが急勾配という前提での上限値なので実際はより小さい。DEM取得の工数に見合うかは要判断。</li>
+  <li><span class="k">実画面の目視確認が不十分。</span>3Dマップは単体HTML版のみブラウザで確認済み。処方モードは AppTest（要素とデータ）までの検証で、実画面は未確認。</li>
+  <li><code>calendar_dates.txt</code>（特定日の運休・追加）は未対応。祝日ダイヤは「日祝」の service_id で近似している。</li>
+  <li>徒歩エッジ生成が停留所2,329件の総当たり（542万回）で、大規模都市では実用にならない。</li>
+  <li>main へのマージは未実施。公開中のアプリには未反映。</li>
+  <li>デマンド交通（GTFS-Flex）は機能過多を避けるため削除した。コンテストの2026年重点項目ではあるため、復活させる場合は git 履歴から戻せる。</li>
+</ul>
+
+<footer>
+  transit-accessibility / K-hskw ／ ブランチ fix/network-and-isochrone（12コミット） ／ 本報告の数値は全て修正後ネットワークでの実測値
+</footer>
+
+</body>
+</html>

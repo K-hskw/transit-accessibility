@@ -1,7 +1,6 @@
 pandas
-geopandas
-folium
+numpy
 streamlit
+folium
 streamlit-folium
-shapely
-networkx
+pydeck

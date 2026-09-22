@@ -2,6 +2,8 @@ import pandas as pd
 from math import radians, sin, cos, sqrt, atan2
 import os
 
+from service_calendar import describe_day_types
+
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     dlat = radians(lat2 - lat1)
@@ -22,20 +24,28 @@ def build_network(gtfs_dir="gtfs_data", output_dir="."):
     trips = pd.read_csv(os.path.join(gtfs_dir, "trips.txt"))
     calendar = pd.read_csv(os.path.join(gtfs_dir, "calendar.txt"))
 
-    # 平日ダイヤに絞る
-    weekday_services = calendar[calendar["monday"] == 1]["service_id"].tolist()
-    weekday_trips = trips[trips["service_id"].isin(weekday_services)]["trip_id"].tolist()
-    weekday_stop_times = stop_times[stop_times["trip_id"].isin(weekday_trips)].copy()
+    # ダイヤ種別で絞り込まず全便のエッジを作る。
+    # 平日/土曜/日祝の切り替えは TransitEngine 側で行う（種別ごとに
+    # ネットワークを作り直さずに済み、休日の空白も同じデータで測れる）。
+    all_stop_times = stop_times[stop_times["trip_id"].isin(set(trips["trip_id"]))].copy()
 
-    print(f"平日の便数: {len(weekday_trips)}")
-    print(f"平日の停車レコード数: {len(weekday_stop_times)}")
+    # 通過時刻を省略するGTFS（timepointのみ記載）があるため、時刻が無い
+    # 停車レコードは落とす。落とさないと time_to_seconds が NaN で落ちる。
+    before = len(all_stop_times)
+    all_stop_times = all_stop_times.dropna(subset=["arrival_time", "departure_time"])
+    if len(all_stop_times) < before:
+        print(f"時刻が空の停車レコードを除外: {before - len(all_stop_times)} 件")
+
+    print(f"全便数: {all_stop_times['trip_id'].nunique()}")
+    print(f"全停車レコード数: {len(all_stop_times)}")
+    print(describe_day_types(trips, calendar))
 
     # 時刻を秒に変換
-    weekday_stop_times["arrival_sec"] = weekday_stop_times["arrival_time"].apply(time_to_seconds)
-    weekday_stop_times["departure_sec"] = weekday_stop_times["departure_time"].apply(time_to_seconds)
+    all_stop_times["arrival_sec"] = all_stop_times["arrival_time"].apply(time_to_seconds)
+    all_stop_times["departure_sec"] = all_stop_times["departure_time"].apply(time_to_seconds)
 
     # バス移動エッジを作成
-    weekday_stop_times = weekday_stop_times.sort_values(["trip_id", "stop_sequence"])
+    weekday_stop_times = all_stop_times.sort_values(["trip_id", "stop_sequence"])
 
     edges = []
     for trip_id, group in weekday_stop_times.groupby("trip_id"):
@@ -52,7 +62,12 @@ def build_network(gtfs_dir="gtfs_data", output_dir="."):
             arr_time = int(rows[i+1][arr_idx])
             travel_time = arr_time - dep_time
 
-            if travel_time > 0:
+            # GTFS-JPの時刻は分単位のため、近接する停留所間は travel_time が
+            # 0 になる。これを除外すると便の連鎖が切れ、その先の停留所が
+            # 到達不能になる（道南バスでは2,737区間・148停留所が消えていた）。
+            # 時刻表の時刻は絶対値なので0秒エッジを残しても誤差は停留所あたり
+            # 1分未満で、便の総所要時間には累積しない。時刻逆転（負値）のみ除外。
+            if travel_time >= 0:
                 edges.append({
                     "from_stop": from_stop,
                     "to_stop": to_stop,

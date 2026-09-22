@@ -1,17 +1,27 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 import folium
 import os
 import zipfile
 import tempfile
 import shutil
+import pydeck as pdk
 from streamlit_folium import st_folium
 from transit_engine import TransitEngine
 from population import PopulationData, FacilityData
 from build_network import build_network
+from blank_area import BlankAreaAnalyzer, aggregate_to_500m
+from prescription import Plan, compare, rank_routes_by_blank_coverage
 
-st.set_page_config(page_title="公共交通アクセシビリティ分析", layout="wide")
-st.title("公共交通アクセシビリティ分析ツール")
+st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と処方", layout="wide")
+st.title("クウハクスコープ")
+st.caption(
+    "バス停からの距離ではなく、**時刻表**で交通空白を測ります。"
+    "同じ地点でも時間帯・曜日で到達できるかが変わり、距離基準ではそれが見えません。"
+    "室蘭市では休日7時に市の46%が拠点へ着けません。"
+    "左の「① 空白を診る → ② 壊れ方を試す → ③ 手を打つ」の順に進めます。"
+)
 
 # ===== データ管理 =====
 DATA_DIR = "."
@@ -48,6 +58,12 @@ def load_facilities():
     if os.path.exists("facilities.csv"):
         return FacilityData("facilities.csv")
     return None
+
+@st.cache_resource
+def load_blank_analyzer(_engine, _pop_data, max_walk_m, walk_speed):
+    # メッシュ×バス停の徒歩対応表は徒歩条件ごとに1度だけ作れば足りる
+    return BlankAreaAnalyzer(_engine, _pop_data,
+                             max_walk_m=max_walk_m, walk_speed_m_min=walk_speed)
 
 # デフォルトデータをロード
 if st.session_state.engine is None:
@@ -180,26 +196,53 @@ if "result_stats" not in st.session_state:
     st.session_state.result_stats = None
 
 # ===== サイドバー =====
-# ===== サイドバー =====
+# モードを「診断 → 劣化 → 処方」の3段に整理する。10個を並列に並べると
+# 初見でどこから触ればよいか分からず、核心の時間空白診断が埋もれるため。
+STEPS = {
+    "① 空白を診る": ["時間空白診断（3D）", "時間帯別到達圏", "到達圏のみ",
+                   "集客圏分析", "施設アクセス"],
+    "② 壊れ方を試す": ["路線廃止", "減便", "バス停削除"],
+    "③ 手を打つ": ["処方（改善施策）", "代替路線追加"],
+}
+# 出発地点・出発時刻を使うのは「起点から出発する」モードだけ。
+# 時間空白診断と処方は拠点と到着時刻で考えるので、出しても効かない。
+ORIGIN_MODES = ("到達圏のみ", "路線廃止", "バス停削除", "減便",
+                "時間帯別到達圏", "施設アクセス", "代替路線追加")
+DEGRADE_MODES = ("路線廃止", "バス停削除", "減便", "代替路線追加")
+
 st.sidebar.header("設定")
+
+# ダイヤ種別。交通空白は休日にこそ深刻になるため平日固定にしない。
+day_type = st.sidebar.radio("ダイヤ", engine.available_day_types, horizontal=True)
+engine.set_day_type(day_type)
+st.sidebar.caption(f"{day_type}ダイヤ: {engine.bus_edges['trip_id'].nunique()}便 / "
+                   f"{len(engine.bus_edges):,}エッジ")
+
+st.sidebar.divider()
+step = st.sidebar.radio("分析の流れ", list(STEPS))
+mode = st.sidebar.radio("分析の種類", STEPS[step])
+st.sidebar.divider()
 
 stop_names = engine.get_stop_names()
 
-start_stop_name = st.sidebar.selectbox(
-    "出発地点", stop_names,
-    index=stop_names.index("室蘭駅前") if "室蘭駅前" in stop_names else 0
-)
+if mode in ORIGIN_MODES:
+    start_stop_name = st.sidebar.selectbox(
+        "出発地点", stop_names,
+        index=stop_names.index("室蘭駅前") if "室蘭駅前" in stop_names else 0
+    )
+    start_hour = st.sidebar.slider("出発時刻（時）", 5, 22, 8)
+    start_minute = st.sidebar.slider("出発時刻（分）", 0, 55, 0, step=5)
+else:
+    # 起点を使わないモードでも、内部の共通処理が参照するので既定値を置く
+    start_stop_name = "室蘭駅前" if "室蘭駅前" in stop_names else stop_names[0]
+    start_hour, start_minute = 8, 0
+
 start_stop_ids = engine.get_stop_ids_by_name(start_stop_name)
 start_stop_id = start_stop_ids[0]
-
-start_hour = st.sidebar.slider("出発時刻（時）", 5, 22, 8)
-start_minute = st.sidebar.slider("出発時刻（分）", 0, 55, 0, step=5)
 start_time_sec = start_hour * 3600 + start_minute * 60
 
 max_time_min = st.sidebar.select_slider("制限時間（分）", options=[15, 30, 45, 60, 90], value=60)
 max_time_sec = max_time_min * 60
-
-mode = st.sidebar.radio("シミュレーションモード", ["到達圏のみ", "路線廃止", "バス停削除", "減便", "時間帯別到達圏", "施設アクセス", "デマンド交通", "代替路線追加", "集客圏分析"])
 remove_route_id = None
 selected_route_name = ""
 remove_stop_ids = []
@@ -283,17 +326,13 @@ elif mode == "減便":
         reduce_pct = st.sidebar.slider("削減率（%）", 10, 80, 50, step=10)
         reduce_ratio = reduce_pct / 100
 
-threshold_min = st.sidebar.slider("悪化閾値（分）", 1, 15, 1)
+# 「何分悪化したら悪化と数えるか」は前後比較をする劣化モードでのみ意味がある
+if mode in DEGRADE_MODES:
+    threshold_min = st.sidebar.slider("悪化閾値（分）", 1, 15, 1)
+else:
+    threshold_min = 1
 
-if mode == "デマンド交通":
-    demand_center_name = st.sidebar.selectbox(
-        "デマンド交通の中心バス停", stop_names,
-        index=stop_names.index("東室蘭駅東口") if "東室蘭駅東口" in stop_names else 0
-    )
-    demand_radius_m = st.sidebar.slider("デマンド交通の対象エリア半径（m）", 500, 5000, 2000, step=500)
-    demand_time_min = st.sidebar.slider("エリア内移動の所要時間（分）", 5, 30, 15)
-
-elif mode == "代替路線追加":
+if mode == "代替路線追加":
     st.sidebar.markdown("**廃止する既存路線（任意）**")
     direct_routes, transfer_routes = engine.get_routes_grouped_by_access(start_stop_name)
     route_options_alt = {}
@@ -317,6 +356,45 @@ elif mode == "代替路線追加":
     alt_interval = st.sidebar.slider("運行間隔（分）", 10, 120, 30, step=10)
     alt_speed = st.sidebar.slider("平均速度（km/h）", 15, 60, 25, step=5)
 
+elif mode in ("時間空白診断（3D）", "処方（改善施策）"):
+    # 空白の定義（拠点・徒歩条件）は診断と処方で揃える必要があるので共通化する
+    st.sidebar.markdown("**生活拠点（ここに着けるかで空白を判定）**")
+    blank_dest_names = st.sidebar.multiselect(
+        "拠点バス停（複数可）", stop_names,
+        default=[n for n in ["東室蘭駅東口"] if n in stop_names]
+    )
+    blank_dest_ids = []
+    for n in blank_dest_names:
+        blank_dest_ids.extend(engine.get_stop_ids_by_name(n))
+
+    blank_walk_m = st.sidebar.slider("メッシュから乗車できる徒歩距離（m）", 200, 1000, 500, step=100)
+    blank_walk_speed = st.sidebar.radio(
+        "徒歩速度", [67, 40],
+        format_func=lambda v: "一般 67m/分" if v == 67 else "高齢者 40m/分"
+    )
+
+    if mode == "時間空白診断（3D）":
+        blank_mesh_level = st.sidebar.radio(
+            "メッシュ粒度", [500, 100],
+            format_func=lambda v: f"{v}mメッシュ"
+        )
+        st.sidebar.caption("100mメッシュは1kmの10等分のため250mには割り切れない。標準メッシュで作れるのは500m（5×5セル）。")
+        blank_elev_scale = st.sidebar.slider("柱の高さ倍率", 1, 20, 6)
+    else:
+        st.sidebar.markdown("**対象とする時刻**")
+        presc_hour = st.sidebar.slider("この時刻までに拠点へ着けるか（時）", 5, 22, 7)
+        st.sidebar.caption("休日の朝など、空白が大きい時間帯を選ぶと施策の差が出やすい。")
+
+        st.sidebar.markdown("**増便**")
+        inc_window = st.sidebar.slider("増便する時間帯", 5, 22, (5, 9))
+        inc_trips = st.sidebar.slider("パターンごとの追加便数", 1, 4, 1)
+        st.sidebar.caption("方向別に足すため、往復2パターンなら実際の追加は2倍になる。")
+
+        st.sidebar.markdown("**ダイヤシフト（増便せず時間帯を移す）**")
+        shift_from = st.sidebar.slider("便を減らす時間帯", 5, 22, (10, 15))
+        shift_trips = st.sidebar.slider("パターンごとの移動便数", 1, 4, 2)
+        presc_n_routes = st.sidebar.slider("比較する候補路線数", 1, 6, 3)
+
 # ===== 地図生成ヘルパー =====
 def build_popup(stop_id, prev, start_time_sec, engine, prefix="", extra=""):
     if stop_id not in engine.stop_coords.index:
@@ -338,7 +416,12 @@ def build_popup(stop_id, prev, start_time_sec, engine, prefix="", extra=""):
     return popup_text
 
 # ===== 計算実行 =====
-if st.sidebar.button("シミュレーション実行", type="primary"):
+# この実行ブロックが結果を作れるのは下の5モードだけ。他のモードは自前の
+# 実行ボタンを持っている。全モードでこのボタンを出していたため、対応しない
+# モードで押すと result_after が未定義のまま参照されてアプリが落ちていた。
+SIM_MODES = ("到達圏のみ", "路線廃止", "バス停削除", "減便", "代替路線追加")
+
+if mode in SIM_MODES and st.sidebar.button("シミュレーション実行", type="primary"):
     with st.spinner("計算中..."):
         result_before, prev_before = engine.calc_isochrone(
             start_stop_id, start_time_sec, max_time_sec, track_path=True
@@ -468,17 +551,6 @@ if st.sidebar.button("シミュレーション実行", type="primary"):
                         "all", reduce_ratio=reduce_ratio, track_path=True
                     )
                     sim_label = f"全路線一律 {int(reduce_ratio*100)}%削減"
-
-            elif mode == "デマンド交通":
-                demand_center_ids = engine.get_stop_ids_by_name(demand_center_name)
-                demand_center_id = demand_center_ids[0] if demand_center_ids else start_stop_id
-                result_after, prev_after = engine.simulate_demand_transit(
-                    start_stop_id, start_time_sec, max_time_sec,
-                    demand_center_id, radius_m=demand_radius_m,
-                    demand_time_sec=demand_time_min * 60, track_path=True
-                )
-                sim_label = f"デマンド交通: {demand_center_name}中心 {demand_radius_m}m圏 {demand_time_min}分"
-                remove_stop_ids = []
 
             elif mode == "代替路線追加":
                 alt_new_stop_ids = []
@@ -952,8 +1024,236 @@ if mode == "施設アクセス":
                     for fac in access:
                         if not fac["accessible"]:
                             st.markdown(f"❌ {fac['facility_name']}")
+# ===== 時間空白診断（3Dカラム）モード =====
+if mode == "時間空白診断（3D）":
+    st.subheader("時間空白診断")
+    st.caption("柱の高さ＝その時間帯に拠点へ着けない人口。色＝1日のうち何時間帯で空白になるか。")
+
+    if pop_data is None:
+        st.warning("メッシュ人口データが読み込まれていないため、この分析は実行できません。")
+    elif not blank_dest_ids:
+        st.info("サイドバーで生活拠点のバス停を1つ以上選んでください。")
+    else:
+        analyzer = load_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
+
+        def run_blank_diagnosis():
+            hours = list(range(5, 23))
+            per_hour = {}
+            blank_hours = np.zeros(analyzer.n_mesh, dtype=int)
+            for h in hours:
+                df_h = analyzer.diagnose(blank_dest_ids, h * 3600, max_time_sec)
+                per_hour[h] = df_h
+                blank_hours += (~df_h["reachable"]).to_numpy().astype(int)
+            st.session_state.blank_result = {
+                "hours": hours,
+                "per_hour": per_hour,
+                "blank_hours": blank_hours,
+                "dest_names": list(blank_dest_names),
+                "max_time_min": max_time_min,
+                "walk_m": blank_walk_m,
+                "walk_speed": blank_walk_speed,
+                "day_type": day_type,
+            }
+
+        # 起動直後に核心の結果が出ている状態にする。空のフォームで待たせると、
+        # 短時間しか触らない相手には何のツールか伝わらない。全18時間帯で約2秒。
+        if "blank_result" not in st.session_state:
+            with st.spinner("全時間帯の空白人口を計算中..."):
+                run_blank_diagnosis()
+
+        if st.sidebar.button("この条件で再計算", type="primary"):
+            with st.spinner("全時間帯の空白人口を計算中..."):
+                run_blank_diagnosis()
+
+        result = st.session_state.get("blank_result")
+        if result is None:
+            st.info("サイドバーの「空白診断を実行」を押してください。")
+        else:
+            st.caption(
+                f"{result.get('day_type', '?')}ダイヤ ／ 拠点: {'、'.join(result['dest_names'])} ／ "
+                f"制限 {result['max_time_min']}分 ／ "
+                f"徒歩 {result['walk_m']}m・{result['walk_speed']}m/分"
+            )
+            if result.get("day_type") != day_type:
+                st.warning(f"表示中の結果は「{result.get('day_type')}ダイヤ」で計算したものです。"
+                           f"現在の設定（{day_type}）で見るには再実行してください。")
+            sel_hour = st.slider("到着時刻（時）", min(result["hours"]), max(result["hours"]),
+                                 min(9, max(result["hours"])))
+            df_sel = result["per_hour"][sel_hour].copy()
+            # 静的空白（徒歩圏にバス停なし）は終日空白になるのが当たり前なので、
+            # 深刻度（何時間帯で空白か）は静的でないメッシュだけで数える。
+            df_sel["blank_hours"] = np.where(df_sel["static_blank"], 0, result["blank_hours"])
+            df_sel["blank_pop"] = np.where(df_sel["reachable"], 0.0, df_sel["pop"])
+            df_sel["blank_elderly"] = np.where(df_sel["reachable"], 0.0, df_sel["elderly"])
+            df_sel["static_pop"] = np.where(df_sel["static_blank"], df_sel["pop"], 0.0)
+
+            n_hours = len(result["hours"])
+            if blank_mesh_level == 500:
+                cells = aggregate_to_500m(df_sel)
+                key = df_sel["meshcode"].astype(str)
+                df_sel["_cell"] = (key.str[:8]
+                                   + (key.str[8].astype(int) // 5).astype(str)
+                                   + (key.str[9].astype(int) // 5).astype(str))
+                cells["static_pop"] = cells["cell"].map(
+                    df_sel.groupby("_cell")["static_pop"].sum()).fillna(0.0)
+                radius, inner = 250, 210
+            else:
+                cells = df_sel
+                radius, inner = 50, 42
+
+            # 深刻度（1〜5）を暖色に対応させる。docs/ の単体版と同じ配色。
+            SEV = ["#F7D2B8", "#F0A575", "#E07440", "#BC4C22", "#7F2E14"]
+            def sev_rgb(h):
+                step = 1 if h <= 3 else 2 if h <= 7 else 3 if h <= 11 else 4 if h <= 15 else 5
+                c = SEV[step - 1].lstrip("#")
+                return [int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)]
+
+            base = cells[cells["static_pop"] > 0].copy()          # 灰色の土台
+            base["static_disp"] = base["static_pop"].round().astype(int)
+            time_cells = cells[(cells["blank_pop"] - cells["static_pop"]) > 0].copy()  # 暖色の柱
+            time_cells[["r", "g", "b"]] = [sev_rgb(int(h)) for h in time_cells["blank_hours"]]
+            time_cells["blank_pop_disp"] = time_cells["blank_pop"].round().astype(int)
+            time_cells["blank_elderly_disp"] = time_cells["blank_elderly"].round().astype(int)
+            time_cells["time_disp"] = (time_cells["blank_pop"] - time_cells["static_pop"]).round().astype(int)
+
+            total_pop = float(df_sel["pop"].sum())
+            blank_pop = float(df_sel.loc[~df_sel["reachable"], "pop"].sum())
+            blank_eld = float(df_sel.loc[~df_sel["reachable"], "elderly"].sum())
+            static_pop = float(df_sel.loc[df_sel["static_blank"], "pop"].sum())
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("空白人口", f"{blank_pop:,.0f}人", f"{100*blank_pop/max(total_pop,1):.1f}%")
+            c2.metric("うち高齢者", f"{blank_eld:,.0f}人")
+            c3.metric("静的空白（徒歩圏にバス停なし）", f"{static_pop:,.0f}人")
+            c4.metric("時間空白（バス停はあるが間に合わない）",
+                      f"{blank_pop - static_pop:,.0f}人")
+
+            view = pdk.ViewState(
+                latitude=float(df_sel["lat"].mean()),
+                longitude=float(df_sel["lon"].mean()),
+                zoom=11, pitch=50, bearing=0,
+            )
+            # 灰色の土台（静的空白）の上に、時間空白の柱（暖色・深刻度で色分け）を重ねる
+            static_layer = pdk.Layer(
+                "ColumnLayer",
+                data=base[["lon", "lat", "static_pop", "static_disp"]],
+                get_position=["lon", "lat"], get_elevation="static_pop",
+                elevation_scale=blank_elev_scale, radius=radius,
+                get_fill_color=[174, 184, 194, 200], pickable=True, auto_highlight=True,
+            )
+            time_layer = pdk.Layer(
+                "ColumnLayer",
+                data=time_cells[["lon", "lat", "blank_pop", "blank_pop_disp",
+                                 "blank_elderly_disp", "time_disp", "blank_hours", "r", "g", "b"]],
+                get_position=["lon", "lat"], get_elevation="blank_pop",
+                elevation_scale=blank_elev_scale, radius=inner,
+                get_fill_color=["r", "g", "b", 220], pickable=True, auto_highlight=True,
+            )
+            st.pydeck_chart(pdk.Deck(
+                layers=[static_layer, time_layer],
+                initial_view_state=view,
+                map_style="light",
+                tooltip={"text": "空白人口 {blank_pop_disp}人\n"
+                                 "うち時間空白 {time_disp}人\n"
+                                 "うち高齢者 {blank_elderly_disp}人\n"
+                                 "時間空白になる時間帯 {blank_hours}/" + str(n_hours)},
+            ))
+
+            st.caption("灰色の土台＝静的空白（徒歩圏にバス停なし） ／ "
+                       "暖色の柱＝時間空白。色が濃いほど多くの時間帯で着けない。")
+
+            st.markdown("**時間帯別の空白人口**")
+            hourly = pd.DataFrame({
+                "時": result["hours"],
+                "空白人口": [
+                    float(result["per_hour"][h].loc[~result["per_hour"][h]["reachable"], "pop"].sum())
+                    for h in result["hours"]
+                ],
+            }).set_index("時")
+            st.bar_chart(hourly)
+
+# ===== 処方（改善施策）モード =====
+if mode == "処方（改善施策）":
+    st.subheader("処方：どの施策が空白を減らすか")
+    st.caption("診断で見つけた時間空白に対し、増便とダイヤシフトの効果を同じ指標（空白人口）で比較します。")
+
+    if pop_data is None:
+        st.warning("メッシュ人口データが読み込まれていないため、この分析は実行できません。")
+    elif not blank_dest_ids:
+        st.info("サイドバーで生活拠点のバス停を1つ以上選んでください。")
+    else:
+        analyzer = load_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
+        diag = analyzer.diagnose(blank_dest_ids, presc_hour * 3600, max_time_sec)
+        summary = analyzer.summarize(diag)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"{presc_hour}時までに着けない人口", f"{summary['blank_pop']:,}人",
+                  f"{100*summary['blank_pop']/max(summary['total_pop'],1):.1f}%")
+        c2.metric("うち高齢者", f"{summary['blank_elderly']:,}人")
+        c3.metric("うち時間空白（施策で減らせる分）",
+                  f"{summary['blank_pop'] - summary['static_blank_pop']:,}人")
+        st.caption(f"{day_type}ダイヤ ／ 拠点: {'、'.join(blank_dest_names)} ／ 制限 {max_time_min}分 ／ "
+                   f"徒歩 {blank_walk_m}m・{blank_walk_speed}m/分")
+
+        candidates = rank_routes_by_blank_coverage(engine, analyzer, diag)
+        if candidates.empty:
+            st.info("空白地域を通る路線が見つかりませんでした。拠点や時刻を変えてみてください。")
+        else:
+            st.markdown("**空白地域を通る路線（施策の候補）**")
+            st.caption("便数の多い路線を選んでも空白は減りません。空白地域を通る路線かどうかで選ぶ必要があります。")
+            st.dataframe(candidates.head(10), hide_index=True, width="stretch")
+
+            picked = st.multiselect(
+                "比較する路線", list(candidates["route_id"]),
+                default=list(candidates.head(presc_n_routes)["route_id"]),
+                format_func=lambda rid: candidates.set_index("route_id").loc[rid, "route_name"],
+            )
+
+            if st.button("施策を比較する", type="primary") and picked:
+                names = candidates.set_index("route_id")["route_name"]
+                plans = []
+                for rid in picked:
+                    label = str(names.loc[rid])[:18]
+                    plans.append(Plan(
+                        f"増便 {label}（{inc_window[0]}-{inc_window[1]}時 +{inc_trips}便/パターン）",
+                        lambda e, x=rid: e.edges_after_frequency_increase(
+                            x, inc_window[0], inc_window[1], inc_trips)))
+                    plans.append(Plan(
+                        f"シフト {label}（{shift_from[0]}-{shift_from[1]}時→{inc_window[0]}-{inc_window[1]}時 {shift_trips}便）",
+                        lambda e, x=rid: e.edges_after_timetable_shift(
+                            x, shift_from, inc_window, shift_trips)))
+                if len(picked) > 1:
+                    def _multi(e, ids=tuple(picked)):
+                        bus, walk = e.bus_edges, e.walk_edges
+                        for x in ids:
+                            with e.scenario(bus, walk):
+                                bus, walk = e.edges_after_frequency_increase(
+                                    x, inc_window[0], inc_window[1], inc_trips)
+                        return bus, walk
+                    plans.append(Plan(f"増便 選んだ{len(picked)}路線すべて", _multi))
+
+                with st.spinner("全時間帯で効果を計算中..."):
+                    st.session_state.presc_table = compare(
+                        engine, analyzer, blank_dest_ids, plans,
+                        arrival_hour=presc_hour, max_time_sec=max_time_sec)
+
+            table = st.session_state.get("presc_table")
+            if table is not None:
+                st.markdown("**施策の比較（全日の削減が大きい順）**")
+                st.dataframe(table, hide_index=True, width="stretch")
+                st.caption(
+                    "「全日の削減」は5〜22時の延べ空白人口の減少。ダイヤシフトは便を移すだけなので"
+                    "狙った時刻は必ず良くなりますが、便を抜いた時間帯は悪化します。"
+                    "単一時刻だけで見ると『費用ゼロで改善』に見えてしまうため全日で評価しています。"
+                    "「運行キロ増」は費用の代理値（追加便数×路線長）で、実際の単価を掛ければ金額になります。"
+                )
+                worsen = table[table["全日の削減"] < 0]
+                if not worsen.empty:
+                    st.warning("全日で見ると逆効果になる施策があります: "
+                               + "、".join(worsen["施策"].tolist()))
+
 # ===== 結果表示 =====
-if st.session_state.result_map is not None:
+if mode not in ("時間空白診断（3D）", "処方（改善施策）") and st.session_state.result_map is not None:
     col1, col2 = st.columns([3, 1])
 
     with col1:
