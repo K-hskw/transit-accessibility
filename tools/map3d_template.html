@@ -83,6 +83,9 @@ th{color:var(--muted);font-weight:500;font-size:11px}
 .sw{width:12px;height:12px;border-radius:2px;display:inline-block;border:1px solid var(--line)}
 .dot{width:6px;height:6px;border-radius:50%;display:inline-block;background:var(--stop);margin:0 3px}
 .hint{position:absolute;right:16px;top:16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:6px 10px;font-size:11.5px;color:var(--muted);box-shadow:var(--shadow)}
+.inset{position:absolute;left:16px;top:16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:9px 10px 7px;box-shadow:var(--shadow);width:168px}
+.inset svg{width:100%;height:auto;display:block}
+.inset .t{font-size:10.5px;color:var(--faint);margin-top:5px;line-height:1.45}
 .status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;font-size:12.5px;color:var(--muted);box-shadow:var(--shadow);max-width:80%;white-space:pre-wrap}
 .status.err{color:#B3261E;border-color:#B3261E}
 .dk-tip{font-family:var(--font-jp);font-size:12px;line-height:1.45}
@@ -92,6 +95,10 @@ th{color:var(--muted);font-weight:500;font-size:11px}
   .map-wrap{order:-1;height:58vh}
   .panel{border-right:0;border-top:1px solid var(--line)}
   .legend{max-width:200px}
+  /* 狭い画面ではインセットと重なるので注記は省く */
+  .hint{display:none}
+  .inset{width:118px;padding:7px 8px 5px}
+  .inset .t{font-size:9.5px}
 }
 @media (prefers-reduced-motion: reduce){ *{transition:none!important} }
 </style>
@@ -139,6 +146,10 @@ th{color:var(--muted);font-weight:500;font-size:11px}
   <main class="map-wrap">
     <div id="map" aria-label="3Dマップ"></div>
     <div id="status" class="status">3D ライブラリを読み込んでいます…</div>
+    <figure class="inset">
+      <svg id="inset-svg" viewBox="0 0 168 130" role="img" aria-label="北海道における室蘭市の位置"></svg>
+      <figcaption class="t">北海道における室蘭市の位置<br>輪郭: 地球地図日本（国土地理院）</figcaption>
+    </figure>
     <div class="legend">
       <div class="t">柱の高さ ＝ その時刻までに拠点へ着けない人口</div>
       <div class="ramp" id="ramp"></div>
@@ -315,14 +326,41 @@ function buildTable(){
 }
 function buildRamp(){ $("#ramp").innerHTML = [1,2,3,4,5].map(i=>`<i style="background:var(--sev${i})"></i>`).join(""); }
 
+// 隅の北海道インセット。市域の形だけでは道内のどこかが分からないため、
+// 全体の中での室蘭の位置を示す。緯度による経度の縮みを補正して描く。
+function buildInset(){
+  const rings = D.hokkaido || [];
+  if(!rings.length) return;
+  const W = 168, H = 130, PAD = 9;
+  const pts = rings.flat();
+  const lo0 = Math.min(...pts.map(p=>p[0])), lo1 = Math.max(...pts.map(p=>p[0]));
+  const la0 = Math.min(...pts.map(p=>p[1])), la1 = Math.max(...pts.map(p=>p[1]));
+  const kx = Math.cos((la0+la1)/2 * Math.PI/180);      // 経度1度は緯度1度より短い
+  const s = Math.min((W-PAD*2)/((lo1-lo0)*kx), (H-PAD*2)/(la1-la0));
+  const ox = (W - (lo1-lo0)*kx*s)/2, oy = (H - (la1-la0)*s)/2;
+  const X = lon => ox + (lon-lo0)*kx*s;
+  const Y = lat => oy + (la1-lat)*s;                    // 北が上
+  const paths = rings.map(r =>
+    `<path d="${r.map((p,i)=>(i?"L":"M")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)).join("")}Z" `
+    + `fill="${tok("--land")}" stroke="${tok("--faint")}" stroke-width=".7" stroke-linejoin="round"/>`
+  ).join("");
+  const mx = X(M.center.lon), my = Y(M.center.lat);
+  $("#inset-svg").innerHTML = paths
+    + `<circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="7" fill="none" stroke="${tok("--sev4")}" stroke-width="1.6"/>`
+    + `<circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="2.6" fill="${tok("--sev5")}"/>`
+    + `<text x="${(mx-10).toFixed(1)}" y="${(my+4).toFixed(1)}" text-anchor="end" font-size="10" font-weight="700" `
+    + `fill="${tok("--ink")}" font-family="Zen Kaku Gothic New, sans-serif">室蘭</text>`;
+}
+
 $("#hour").addEventListener("input", e=>{ hour=+e.target.value; render(); });
 $("#day-wd").addEventListener("click", ()=>setDay("wd"));
 $("#day-hd").addEventListener("click", ()=>setDay("hd"));
 function setDay(k){ dayKey=k; $("#day-wd").setAttribute("aria-pressed", k==="wd"); $("#day-hd").setAttribute("aria-pressed", k==="hd"); render(); }
 
 // テーマが切り替わったら deck.gl 側の色も引き直す
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=>render());
-new MutationObserver(()=>render()).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+function repaint(){ buildInset(); render(); }
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", repaint);
+new MutationObserver(repaint).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
 
-buildRamp(); buildTable(); initDeck(); render();
+buildRamp(); buildTable(); buildInset(); initDeck(); render();
 </script>

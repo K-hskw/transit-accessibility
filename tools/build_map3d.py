@@ -27,6 +27,7 @@ from population import PopulationData
 from blank_area import BlankAreaAnalyzer, aggregate_to_500m
 
 TEMPLATE = os.path.join(HERE, "map3d_template.html")
+HOKKAIDO = os.path.join(HERE, "hokkaido.json")
 OUTPUT = os.path.join(ROOT, "docs", "kuhaku-scope-muroran.html")
 
 # 診断の条件（アプリの既定と揃える）
@@ -134,6 +135,9 @@ def compute():
         "values": values, "elderly": elderly, "severity": sev,
         "summary": summary,
         "stops": stops, "labels": labels, "land": land,
+        # 隅に置く北海道インセット用の輪郭。市域だけでは道内のどこか分からないため。
+        # tools/extract_hokkaido.py で生成（出典: 地球地図日本・国土地理院）
+        "hokkaido": json.load(open(HOKKAIDO, encoding="utf-8")),
     }
 
 
