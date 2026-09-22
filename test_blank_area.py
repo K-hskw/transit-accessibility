@@ -133,6 +133,56 @@ test("500mセル中心と構成メッシュの距離が354m以内",
      f"lon差{(merged['lon']-merged['lon_cell']).abs().max():.5f}")
 print(f"  100mメッシュ {len(df9)} -> 500mセル {len(cells)}")
 
+# ===== 7. メッシュ粒度の判別 =====
+# 国勢調査のメッシュ統計は全国で500mと1kmが整備されている。100m限定だと
+# 他地域に適用できないため、桁数で粒度を見分けられることを検証する。
+print("\n--- 7. メッシュ粒度の判別 ---")
+from population import mesh_level, meshcode_to_latlon
+
+test("8桁を1kmと判定", mesh_level("63403779")[0] == "1km")
+test("9桁を500mと判定", mesh_level("634037791")[0] == "500m")
+test("10桁を100mと判定", mesh_level("6340377901")[0] == "100m")
+bad = False
+try:
+    mesh_level("640")
+except ValueError:
+    bad = True
+test("対応外の桁数はエラー", bad)
+
+
+def _old_100m(s):
+    s = str(s)
+    return (int(s[0:2]) / 1.5 + int(s[4]) / 12 + int(s[6]) / 120 + int(s[8]) / 1200 + 1 / 2400,
+            int(s[2:4]) + 100 + int(s[5]) / 8 + int(s[7]) / 80 + int(s[9]) / 800 + 1 / 1600)
+
+
+worst = max(max(abs(a - b) for a, b in zip(meshcode_to_latlon(c), _old_100m(c)))
+            for c in pop_data.df["Meshcode"].astype(str).head(2000))
+test("100mメッシュの中心が従来実装と一致する", worst < 1e-9, f"最大差 {worst}")
+
+# 粗い粒度のセル中心は、その中に含まれる細かいセルの近くに来るはず
+km_lat, km_lon = meshcode_to_latlon("63403779")
+m100_lat, m100_lon = meshcode_to_latlon("6340377901")
+test("1kmセル中心と、その中の100mセル中心が1kmメッシュ内に収まる",
+     abs(km_lat - m100_lat) <= 1 / 120 and abs(km_lon - m100_lon) <= 1 / 80,
+     f"差 {abs(km_lat-m100_lat):.5f}, {abs(km_lon-m100_lon):.5f}")
+
+# 500m/1km を入力したとき、集約が素通しで人口を保存すること
+import pandas as _pd
+for _lvl, _code in [("500m", lambda s: s.str[:8] + "1"), ("1km", lambda s: s.str[:8])]:
+    _src = pop_data.df.head(3000)
+    _c = _code(_src["Meshcode"].astype(str))
+    _df = _pd.DataFrame({"meshcode": _c, "lat": 0.0, "lon": 0.0,
+                         "pop": _src["PopT"].to_numpy(),
+                         "elderly": _src["Pop65over"].to_numpy(),
+                         "reachable": True, "static_blank": False})
+    _cells = aggregate_to_500m(_df)
+    test(f"{_lvl}入力でも人口が保存される",
+         abs(_cells["pop"].sum() - _df["pop"].sum()) < 1e-6)
+    test(f"{_lvl}入力ではセルを細分化しない",
+         len(_cells) == _df["meshcode"].nunique(),
+         f"{len(_cells)} vs {_df['meshcode'].nunique()}")
+
 print("\n" + "=" * 70)
 print(f"テスト結果: {tests_passed}/{tests_run} パス")
 if errors:

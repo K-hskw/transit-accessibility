@@ -22,26 +22,57 @@ def haversine_matrix(lat_a, lon_a, lat_b, lon_b):
     return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
 
+def mesh_level(meshcode):
+    """メッシュコードの桁数から粒度を判別し、(名称, 1辺のメートル) を返す
+
+    国勢調査のメッシュ統計は全国で 1km と 500m が整備されている一方、
+    室蘭で使っている「簡易100mメッシュ人口」は10桁。桁数で見分けることで、
+    どの粒度の人口データでも同じコードで扱えるようにする。
+
+        8桁  63403779    3次メッシュ    約1km
+        9桁  634037791   4次メッシュ    約500m（末尾は1〜4の象限）
+       10桁  6340377901  100mメッシュ   （末尾2桁は0〜9の行・列）
+
+    ※10桁には5次メッシュ（250m、末尾2桁が各1〜4）もあり形式だけでは
+      区別できない。本ツールは100mメッシュとして扱う。
+    """
+    s = str(meshcode).strip()
+    if len(s) == 8:
+        return "1km", 1000.0
+    if len(s) == 9:
+        return "500m", 500.0
+    if len(s) == 10:
+        return "100m", 100.0
+    raise ValueError(f"対応していないメッシュコードです（8/9/10桁）: {meshcode}")
+
+
 def meshcode_to_latlon(meshcode):
-    """100mメッシュコード（10桁）から中心緯度経度を返す"""
-    s = str(meshcode)
-    # 1次メッシュ（4桁）
-    lat1 = int(s[0:2])
-    lon1 = int(s[2:4])
-    # 2次メッシュ（2桁）
-    lat2 = int(s[4])
-    lon2 = int(s[5])
-    # 3次メッシュ（2桁）
-    lat3 = int(s[6])
-    lon3 = int(s[7])
-    # 4次メッシュ（100mメッシュ、2桁）
-    lat4 = int(s[8])
-    lon4 = int(s[9])
+    """メッシュコードから、そのセルの中心の緯度経度を返す（8/9/10桁に対応）"""
+    s = str(meshcode).strip()
+    level, _size = mesh_level(s)
 
-    lat = lat1 / 1.5 + lat2 / 12 + lat3 / 120 + lat4 / 1200 + 1/2400
-    lon = lon1 + 100 + lon2 / 8 + lon3 / 80 + lon4 / 800 + 1/1600
+    # 3次メッシュ（約1km）の南西角
+    lat = int(s[0:2]) / 1.5 + int(s[4]) / 12 + int(s[6]) / 120
+    lon = int(s[2:4]) + 100 + int(s[5]) / 8 + int(s[7]) / 80
+    # 3次メッシュ1つぶんの大きさ
+    dlat, dlon = 1 / 120, 1 / 80
 
-    return lat, lon
+    if level == "500m":
+        # 4次メッシュ: 1=南西 2=南東 3=北西 4=北東
+        q = int(s[8])
+        dlat, dlon = dlat / 2, dlon / 2
+        if q in (3, 4):
+            lat += dlat
+        if q in (2, 4):
+            lon += dlon
+    elif level == "100m":
+        # 末尾2桁が3次メッシュ内の行・列（各0〜9）
+        dlat, dlon = dlat / 10, dlon / 10
+        lat += int(s[8]) * dlat
+        lon += int(s[9]) * dlon
+
+    # 南西角にセルの半分を足して中心にする
+    return lat + dlat / 2, lon + dlon / 2
 
 
 class PopulationData:

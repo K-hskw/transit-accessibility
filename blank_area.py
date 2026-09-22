@@ -14,38 +14,50 @@
 import numpy as np
 import pandas as pd
 
-from population import haversine_matrix
+from population import haversine_matrix, mesh_level
 
 
 def aggregate_to_500m(df):
-    """100mメッシュの診断結果を500mメッシュ（1/2地域メッシュ）に集約する
+    """診断結果を表示用のセルに集約する（入力メッシュの粒度を自動判別）
 
-    設計メモは250mメッシュを想定しているが、100mメッシュは1kmを10等分した
-    ものなので250m（4等分）には整数で割り切れない。標準メッシュ体系で
-    100mから素直に作れるのは500m（1kmの2等分・5×5セル）なのでこれを採る。
+    100mメッシュなら5×5をまとめて500mセルにする。設計メモは250mを想定して
+    いたが、100mメッシュは1kmを10等分したものなので250m（4等分）には整数で
+    割り切れない。標準メッシュ体系で100mから素直に作れるのが500mのため。
+
+    国勢調査のメッシュ統計は全国で500mと1kmが整備されており、これらが
+    入力された場合はすでに表示に適した粒度なのでそのまま1セルとして扱う。
 
     人口は合計、空白判定は「そのセルの人口の過半が空白なら空白」とする。
     """
     code = df["meshcode"].astype(str)
     km = code.str[:8]
-    row = code.str[8].astype(int)
-    col = code.str[9].astype(int)
-    half_row = row // 5
-    half_col = col // 5
+    # 3次メッシュ（約1km）南西角
+    base_lat = km.str[0:2].astype(int) / 1.5 + km.str[4].astype(int) / 12 + km.str[6].astype(int) / 120
+    base_lon = km.str[2:4].astype(int) + 100 + km.str[5].astype(int) / 8 + km.str[7].astype(int) / 80
 
-    # 500mセルの中心座標をメッシュコードから直接計算する（欠損セルがあっても
-    # 重心がずれないよう、構成セルの平均ではなくセル自体の中心を使う）
-    lat1 = km.str[0:2].astype(int)
-    lon1 = km.str[2:4].astype(int)
-    lat2 = km.str[4].astype(int)
-    lon2 = km.str[5].astype(int)
-    lat3 = km.str[6].astype(int)
-    lon3 = km.str[7].astype(int)
-    cell_lat = lat1 / 1.5 + lat2 / 12 + lat3 / 120 + (half_row * 5 + 2.5) / 1200
-    cell_lon = lon1 + 100 + lon2 / 8 + lon3 / 80 + (half_col * 5 + 2.5) / 800
+    level = mesh_level(code.iloc[0])[0] if len(code) else "100m"
+    if level == "100m":
+        # 5×5 の100mセルを1つの500mセルにまとめる
+        half_row = code.str[8].astype(int) // 5
+        half_col = code.str[9].astype(int) // 5
+        cell_id = km + half_row.astype(str) + half_col.astype(str)
+        # セル中心はコードから直接求める（構成セルが欠けても重心がずれない）
+        cell_lat = base_lat + (half_row * 5 + 2.5) / 1200
+        cell_lon = base_lon + (half_col * 5 + 2.5) / 800
+    elif level == "500m":
+        # すでに500m。象限（1=南西 2=南東 3=北西 4=北東）から中心を出す
+        q = code.str[8].astype(int)
+        cell_id = code
+        cell_lat = base_lat + np.where(q.isin([3, 4]), 1.5, 0.5) / 240
+        cell_lon = base_lon + np.where(q.isin([2, 4]), 1.5, 0.5) / 160
+    else:
+        # 1km。分割せずそのまま1セルとする
+        cell_id = code
+        cell_lat = base_lat + 0.5 / 120
+        cell_lon = base_lon + 0.5 / 80
 
     work = df.assign(
-        cell=km + half_row.astype(str) + half_col.astype(str),
+        cell=cell_id,
         cell_lat=cell_lat,
         cell_lon=cell_lon,
         blank_pop=np.where(df["reachable"], 0.0, df["pop"]),
