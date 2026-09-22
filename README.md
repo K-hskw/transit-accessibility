@@ -78,9 +78,12 @@
 | 100mメッシュ人口 | 令和2年国勢調査をもとにした[簡易100mメッシュ人口](https://gtfs-gis.jp/teikyo/) | CC BY |
 | 北海道の海岸線 | [地球地図日本](https://www.gsi.go.jp/kankyochiri/gm_jpn.html)（国土地理院） | 国土地理院コンテンツ利用規約 |
 | 徒歩圏距離の基準 | 国土交通省「都市構造の評価に関するハンドブック」（2014年） | ― |
-| 施設POI | facilities.csv（60件） | ※下記の注記を参照 |
+| 施設POI（医療142件・学校） | [国土数値情報 医療機関（P04）](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-P04-v3_0.html)・[学校（P29）](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-P29-v2_1.html)（国土交通省） | 国土数値情報利用約款 |
 
-> 施設データは暫定的に手動収集したものです。再配布可能な[国土数値情報 医療機関データ](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-P04-v3_0.html)等への差し替えを予定しています。アプリのサイドバーから任意の施設CSVを読み込めます。
+> 施設データは `python tools/build_facilities.py` で再生成できます。学校の分類コードは
+> 公開メタデータに定義が無いため、北海道全2,824件の名称から実証して対応付けています
+> （`tools/verify_school_codes.py`）。福祉施設（P14）は室蘭市のデータが存在しないため未収録です。
+> アプリのサイドバーから任意の施設CSVを読み込むこともできます。
 
 ## プロジェクト構成
 transit-accessibility/

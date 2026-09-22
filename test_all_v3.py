@@ -42,8 +42,13 @@ for ftype in facility_data.facility_types:
         result_before, start_time, facilities, engine.stop_coords
     )
     accessible = sum(1 for a in access if a["accessible"])
-    test(f"施設({ftype}) 結果数==施設数", len(access) == len(facilities),
-         f"結果{len(access)} != 施設{len(facilities)}")
+    # calc_facility_access は徒歩圏（既定500m）に停留所がある施設だけを返す。
+    # 手動収集の旧データは偶然すべて停留所の近くにあり「結果数==施設数」が
+    # 成立していたが、国土数値情報に差し替えると徒歩圏外の施設が現れる
+    # （例: 室蘭市立喜門岱小学校は最寄り停留所まで1,486m）。
+    # 徒歩圏外は欠落ではなく検出すべき事実なので、上限のみを検証する。
+    test(f"施設({ftype}) 結果数<=施設数", len(access) <= len(facilities),
+         f"結果{len(access)} > 施設{len(facilities)}")
     test(f"施設({ftype}) アクセス可能>=0", accessible >= 0)
     test(f"施設({ftype}) アクセス可能<=総数", accessible <= len(access))
 
