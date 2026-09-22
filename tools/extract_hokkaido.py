@@ -66,7 +66,10 @@ def simplify(pts, eps):
 import sys
 sys.setrecursionlimit(20000)
 
-EPS = 0.012          # 度。約1.3km相当。インセット表示には十分
+# 度。約220m相当。柱と同じ本体の地図に重ねるため、室蘭のズームで海岸線が
+# 破綻しない精度が要る（人口メッシュが100m刻みなのでこの程度で釣り合う）。
+# 1.3km相当まで粗くすると噴火湾の海岸線がカクつく。
+EPS = 0.002
 out = []
 for r in kept:
     s = simplify(r, EPS)

@@ -3,8 +3,9 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Sans:wght@400;600&display=swap">
 <style>
 :root{
-  /* 地図タイルが無いので、市域(--land)と地(--ground)の明度差だけが海岸線を示す */
-  --ground:#CFD9E1; --land:#FBF7F0; --panel:#FFFFFF; --line:#D5DCE2;
+  /* 地図タイルが無いので、地(--ground)＝海、--hokkaido＝陸、--land＝室蘭市域 の
+     3段の明度差で地形を表す */
+  --ground:#CFD9E1; --hokkaido:#E6EAED; --land:#FBF7F0; --panel:#FFFFFF; --line:#D5DCE2;
   --ink:#1B2430; --muted:#5C6B7A; --faint:#8A97A4;
   --accent:#1F5F8B; --accent-ink:#FFFFFF;
   --stop:#7C8A99; --static:#AEB8C2;
@@ -17,7 +18,7 @@
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --ground:#080C11; --land:#212C36; --panel:#161D24; --line:#2A343E;
+    --ground:#080C11; --hokkaido:#151D25; --land:#263341; --panel:#161D24; --line:#2A343E;
     --ink:#E7ECF1; --muted:#9AA7B4; --faint:#6E7C8A;
     --accent:#6FB1E0; --accent-ink:#0F151B;
     --stop:#55636F; --static:#3E4A56;
@@ -27,7 +28,7 @@
   }
 }
 :root[data-theme="dark"]{
-  --ground:#080C11; --land:#212C36; --panel:#161D24; --line:#2A343E;
+  --ground:#080C11; --hokkaido:#151D25; --land:#263341; --panel:#161D24; --line:#2A343E;
   --ink:#E7ECF1; --muted:#9AA7B4; --faint:#6E7C8A;
   --accent:#6FB1E0; --accent-ink:#0F151B;
   --stop:#55636F; --static:#3E4A56;
@@ -158,6 +159,7 @@ th{color:var(--muted);font-weight:500;font-size:11px}
       <div class="keys">
         <span><i class="sw" style="background:var(--static)"></i>灰色の土台 ＝ 静的空白（徒歩圏にバス停がない）</span>
         <span><i class="sw" style="background:var(--land)"></i>室蘭市の市域（100mメッシュ人口の範囲）</span>
+        <span><i class="sw" style="background:var(--hokkaido)"></i>北海道の陸地（地球地図日本・国土地理院）</span>
         <span><i class="dot"></i>バス停</span>
       </div>
     </div>
@@ -205,6 +207,9 @@ const LH = M.land_half_lat, LW = M.land_half_lon;
 const land = (D.land || []).map(([lon,lat]) => ({
   polygon: [[lon-LW,lat-LH],[lon+LW,lat-LH],[lon+LW,lat+LH],[lon-LW,lat+LH]]
 }));
+// 北海道の陸地。地のままだと市域が海に浮いて見えるので、実際の海岸線を敷く。
+// 既定のズームでは噴火湾の湾岸が見え、引くと道全体が入る。
+const hokkaido = (D.hokkaido || []).map(ring => ({polygon: ring}));
 const charset = Array.from(new Set(D.labels.map(l=>l.name).join("").split("")));
 
 function sevStep(h){ return h<=3?1:h<=7?2:h<=11?3:h<=15?4:5; }
@@ -216,6 +221,10 @@ function layers(){
   const data = cells.map((c,i)=>({...c, blank:vals[i], eld:eld[i], sev:sev[i]}));
   const theme = tok("--ink");
   return [
+    new deck.PolygonLayer({id:"hokkaido", data:hokkaido, getPolygon:d=>d.polygon,
+      stroked:true, filled:true, getFillColor: rgb(tok("--hokkaido")),
+      getLineColor: rgb(tok("--faint"),110), getLineWidth:60, lineWidthMinPixels:0.8,
+      updateTriggers:{getFillColor:[theme], getLineColor:[theme]}}),
     new deck.PolygonLayer({id:"land", data:land, getPolygon:d=>d.polygon, stroked:false, filled:true,
       getFillColor: rgb(tok("--land")), updateTriggers:{getFillColor:[theme]}}),
     new deck.ScatterplotLayer({id:"stops", data:D.stops, getPosition:d=>d, getRadius:22, radiusMinPixels:1.2,
