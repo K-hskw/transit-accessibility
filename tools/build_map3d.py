@@ -106,6 +106,12 @@ def compute():
 
     stops = [[round(float(r.stop_lon), 5), round(float(r.stop_lat), 5)]
              for r in eng.stop_coords.itertuples()]
+
+    # 市域の形は100mメッシュ人口データの範囲そのもの（室蘭市で切り出されている）。
+    # 地図タイルが使えないため、これを敷いて海岸線と絵鞆半島の形を出す。
+    # 集計に使う500mセルでは粗すぎて市の形に見えない。
+    land = [[round(float(lon), 5), round(float(lat), 5)]
+            for lat, lon in zip(pop._lat, pop._lon)]
     labels = []
     for n in LABEL_NAMES:
         ids = eng.get_stop_ids_by_name(n)
@@ -119,13 +125,15 @@ def compute():
             "dest": DEST_NAME, "max_time_min": MAX_TIME // 60, "walk_m": WALK_M,
             "walk_speed": WALK_SPEED, "mesh_m": 500, "hours": HOURS, "days": DAYS,
             "half_lat": 2.5 / 1200, "half_lon": 2.5 / 800,
+            # 100mメッシュ1辺の半分（緯度1/1200度・経度1/800度が100mメッシュの刻み）
+            "land_half_lat": 0.5 / 1200, "land_half_lon": 0.5 / 800,
             "center": {"lat": float(np.mean([c["lat"] for c in cells_out])),
                        "lon": float(np.mean([c["lon"] for c in cells_out]))},
         },
         "cells": cells_out,
         "values": values, "elderly": elderly, "severity": sev,
         "summary": summary,
-        "stops": stops, "labels": labels,
+        "stops": stops, "labels": labels, "land": land,
     }
 
 
