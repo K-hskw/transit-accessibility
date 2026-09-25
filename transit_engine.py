@@ -18,8 +18,12 @@ class TransitEngine:
     def __init__(self, gtfs_dir="gtfs_data", day_type="平日"):
         self.stops = pd.read_csv(f"{gtfs_dir}/stops.txt")
         self.routes = pd.read_csv(f"{gtfs_dir}/routes.txt")
-        self.trips = pd.read_csv(f"{gtfs_dir}/trips.txt")
-        self.calendar = pd.read_csv(f"{gtfs_dir}/calendar.txt")
+        # service_id は文字列として読む。"01" のようなゼロ詰めのIDを pandas が
+        # 数値と推測して 1 に変換してしまい、trips.txt 側（他の値が混在して
+        # 文字列のまま）と突合できなくなる。旭川電気軌道のフィードでは
+        # これにより全ダイヤが0便と判定されていた。
+        self.trips = pd.read_csv(f"{gtfs_dir}/trips.txt", dtype={"service_id": str})
+        self.calendar = pd.read_csv(f"{gtfs_dir}/calendar.txt", dtype={"service_id": str})
         # カスタムGTFSの場合は対応するエッジファイルを使用
         if gtfs_dir == "gtfs_data_custom" and os.path.exists("bus_edges_custom.csv"):
             self.all_bus_edges = pd.read_csv("bus_edges_custom.csv")

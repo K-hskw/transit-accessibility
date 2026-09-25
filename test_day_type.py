@@ -133,6 +133,40 @@ test("直接操作後もダイヤ切替で正しい状態に戻る",
      len(engine.bus_edges) == edges["平日"],
      f"{len(engine.bus_edges)} vs {edges['平日']}")
 
+# ===== 5. service_id をゼロ詰めのまま扱えるか =====
+# "01" のようなIDを pandas が数値と推測して 1 に変換すると、trips.txt 側
+# （他の値が混在して文字列のまま）と突合できず全ダイヤが0便になる。
+# 旭川電気軌道のフィードで実際に起きた不具合の再発防止。
+print("\n--- 5. ゼロ詰め service_id ---")
+import io as _io
+import pandas as _pd
+from service_calendar import trip_ids_for_day_type as _tids
+
+_cal = _pd.read_csv(_io.StringIO(
+    "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday\n"
+    "01,1,1,1,1,1,0,0\n"
+    "03,0,0,0,0,0,1,1\n"), dtype={"service_id": str})
+_trips = _pd.read_csv(_io.StringIO(
+    "service_id,trip_id\n01,t1\n01,t2\n03,t3\n0770-1_2026/09/01,t4\n"),
+    dtype={"service_id": str})
+
+test("ゼロ詰めIDが文字列として保持される",
+     list(_cal["service_id"]) == ["01", "03"], str(list(_cal["service_id"])))
+test("ゼロ詰めIDで平日の便を拾える",
+     _tids(_trips, _cal, "平日") == {"t1", "t2"},
+     str(_tids(_trips, _cal, "平日")))
+test("ゼロ詰めIDで土曜の便を拾える",
+     _tids(_trips, _cal, "土曜") == {"t3"}, str(_tids(_trips, _cal, "土曜")))
+test("calendar に無い service_id の便は拾わない",
+     "t4" not in _tids(_trips, _cal, "平日") | _tids(_trips, _cal, "土曜"))
+
+# 実データ側でも service_id が文字列で読めていること
+test("読み込んだ calendar の service_id が文字列",
+     engine.calendar["service_id"].map(type).eq(str).all(),
+     str(engine.calendar["service_id"].map(type).unique()))
+test("読み込んだ trips の service_id が文字列",
+     engine.trips["service_id"].map(type).eq(str).all())
+
 print("\n" + "=" * 70)
 print(f"テスト結果: {tests_passed}/{tests_run} パス")
 if errors:

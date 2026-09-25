@@ -21,8 +21,9 @@ def build_network(gtfs_dir="gtfs_data", output_dir="."):
     # データ読み込み
     stops = pd.read_csv(os.path.join(gtfs_dir, "stops.txt"))
     stop_times = pd.read_csv(os.path.join(gtfs_dir, "stop_times.txt"))
-    trips = pd.read_csv(os.path.join(gtfs_dir, "trips.txt"))
-    calendar = pd.read_csv(os.path.join(gtfs_dir, "calendar.txt"))
+    # service_id は文字列として読む（"01" が 1 に変換されて突合できなくなるため）
+    trips = pd.read_csv(os.path.join(gtfs_dir, "trips.txt"), dtype={"service_id": str})
+    calendar = pd.read_csv(os.path.join(gtfs_dir, "calendar.txt"), dtype={"service_id": str})
 
     # ダイヤ種別で絞り込まず全便のエッジを作る。
     # 平日/土曜/日祝の切り替えは TransitEngine 側で行う（種別ごとに
