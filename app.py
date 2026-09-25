@@ -13,6 +13,7 @@ from population import PopulationData, FacilityData
 from build_network import build_network
 from blank_area import BlankAreaAnalyzer, aggregate_to_500m
 from prescription import Plan, compare, rank_routes_by_blank_coverage
+import policy_report
 
 st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と処方", layout="wide")
 st.title("クウハクスコープ")
@@ -1236,6 +1237,11 @@ if mode == "処方（改善施策）":
                     st.session_state.presc_table = compare(
                         engine, analyzer, blank_dest_ids, plans,
                         arrival_hour=presc_hour, max_time_sec=max_time_sec)
+                # 比較表の列名は対象時刻を含む（例「7時の削減」）。あとから時刻を
+                # 変えた状態の表を政策文書に使うと条件と数値が食い違うので、
+                # どの時刻で作った表かを覚えておく。
+                st.session_state.presc_hour_used = presc_hour
+                st.session_state.pop("presc_doc_refined", None)
 
             table = st.session_state.get("presc_table")
             if table is not None:
@@ -1251,6 +1257,77 @@ if mode == "処方（改善施策）":
                 if not worsen.empty:
                     st.warning("全日で見ると逆効果になる施策があります: "
                                + "、".join(worsen["施策"].tolist()))
+
+                # ===== 政策文書の下書き =====
+                st.markdown("---")
+                st.subheader("政策文書の下書き")
+                if st.session_state.get("presc_hour_used") != presc_hour:
+                    st.info(f"表は{st.session_state.get('presc_hour_used')}時で作成されています。"
+                            "現在の設定で「施策を比較する」を押し直すと文書を作成できます。")
+                else:
+                    st.caption("上の数値をそのまま文章にしたものです。生成AIは使っていないため、"
+                               "記載の数値はすべてこの画面の計算結果と一致します。")
+                    doc = policy_report.build_document(policy_report.ReportContext(
+                        region=policy_report.region_from_population_path(
+                            getattr(pop_data, "source_path", None)),
+                        day_type=day_type,
+                        dest_names=blank_dest_names,
+                        arrival_hour=presc_hour,
+                        max_time_min=max_time_min,
+                        walk_m=blank_walk_m,
+                        walk_speed=blank_walk_speed,
+                        summary=summary,
+                        table=table,
+                        candidates=candidates,
+                    ))
+                    st.download_button("下書きをダウンロード（Markdown）", doc,
+                                       file_name=f"政策文書_{presc_hour}時.md",
+                                       mime="text/markdown")
+                    with st.expander("下書きを読む", expanded=False):
+                        st.markdown(doc)
+
+                    with st.expander("生成AIで文章を整える（任意・自分のAPIキーが必要）"):
+                        st.caption(
+                            "数値の計算にAIは関与しません。上の下書きの文章だけを整えます。"
+                            "整えたあとに「下書きに無い数値が増えていないか」を機械的に照合するので、"
+                            "AIが数字を作っていないことを確認できます。"
+                        )
+                        api_key = st.text_input(
+                            "Anthropic APIキー", type="password",
+                            help="このアプリは入力されたキーを保存も送信先の変更もしません。"
+                                 "利用料は入力した方の契約に課金されます。")
+                        ai_model = st.selectbox(
+                            "モデル", list(policy_report.MODEL_CHOICES),
+                            format_func=lambda m: policy_report.MODEL_CHOICES[m])
+                        ai_note = st.text_area(
+                            "追加の指示（任意）", placeholder="例: 議会説明用に、結論を先に書いてください。",
+                            height=80)
+                        if st.button("文章を整える"):
+                            if not api_key.strip():
+                                st.warning("APIキーを入力してください。")
+                            else:
+                                try:
+                                    with st.spinner("生成中..."):
+                                        refined = policy_report.refine(
+                                            doc, api_key, model=ai_model,
+                                            extra_instruction=ai_note)
+                                    st.session_state.presc_doc_refined = refined
+                                except Exception as e:
+                                    st.error(f"整形できませんでした: {e}")
+
+                        refined = st.session_state.get("presc_doc_refined")
+                        if refined:
+                            extra = policy_report.unverified_numbers(doc, refined)
+                            if extra:
+                                st.warning("下書きに無い数値が現れました。"
+                                           "そのまま配布せず、該当箇所を確認してください: "
+                                           + "、".join(extra[:20]))
+                            else:
+                                st.success("数値は下書きと一致しています（新たな数値はありません）。")
+                            st.download_button("整えた文書をダウンロード（Markdown）", refined,
+                                               file_name=f"政策文書_{presc_hour}時_整形済み.md",
+                                               mime="text/markdown")
+                            st.markdown(refined)
 
 # ===== 結果表示 =====
 if mode not in ("時間空白診断（3D）", "処方（改善施策）") and st.session_state.result_map is not None:

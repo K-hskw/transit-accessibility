@@ -77,6 +77,8 @@ def meshcode_to_latlon(meshcode):
 
 class PopulationData:
     def __init__(self, csv_path):
+        # 政策文書に自治体名を載せるためにファイル名を覚えておく
+        self.source_path = str(csv_path)
         self.df = pd.read_csv(csv_path)
         # メッシュコードから緯度経度を計算
         coords = self.df["Meshcode"].apply(lambda m: meshcode_to_latlon(m))

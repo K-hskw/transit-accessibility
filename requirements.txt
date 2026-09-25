@@ -4,3 +4,4 @@ streamlit
 folium
 streamlit-folium
 pydeck
+anthropic
