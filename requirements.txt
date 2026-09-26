@@ -1,7 +1,9 @@
-pandas
-numpy
-streamlit
-folium
-streamlit-folium
-pydeck
-anthropic
+# 動作確認した版で固定する（Streamlit Cloud は再起動のたびに入れ直すため、
+# 固定しないと審査期間中に新しい版で表示が崩れうる）。Python 3.12 で確認。
+streamlit==1.60.0
+pandas==3.0.5
+numpy==2.5.2
+folium==0.20.0
+streamlit-folium==0.27.3
+pydeck==0.9.3
+anthropic==1.8.0

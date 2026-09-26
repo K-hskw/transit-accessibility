@@ -1,4 +1,5 @@
-﻿import os
+﻿import copy
+import os
 import pandas as pd
 import heapq
 from contextlib import contextmanager
@@ -15,7 +16,12 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 class TransitEngine:
-    def __init__(self, gtfs_dir="gtfs_data", day_type="平日"):
+    def __init__(self, gtfs_dir="gtfs_data", day_type="平日", edges_dir=None):
+        """edges_dir を渡すとそこから bus_edges.csv / walk_edges.csv を読む。
+
+        省略時はカレントディレクトリの既定エッジ（室蘭）を読む。アップロードされた
+        GTFSは訪問者ごとの一時ディレクトリにエッジを作り、ここで指定する。
+        """
         self.stops = pd.read_csv(f"{gtfs_dir}/stops.txt")
         self.routes = pd.read_csv(f"{gtfs_dir}/routes.txt")
         # service_id は文字列として読む。"01" のようなゼロ詰めのIDを pandas が
@@ -24,13 +30,9 @@ class TransitEngine:
         # これにより全ダイヤが0便と判定されていた。
         self.trips = pd.read_csv(f"{gtfs_dir}/trips.txt", dtype={"service_id": str})
         self.calendar = pd.read_csv(f"{gtfs_dir}/calendar.txt", dtype={"service_id": str})
-        # カスタムGTFSの場合は対応するエッジファイルを使用
-        if gtfs_dir == "gtfs_data_custom" and os.path.exists("bus_edges_custom.csv"):
-            self.all_bus_edges = pd.read_csv("bus_edges_custom.csv")
-            self.walk_edges = pd.read_csv("walk_edges_custom.csv")
-        else:
-            self.all_bus_edges = pd.read_csv("bus_edges.csv")
-            self.walk_edges = pd.read_csv("walk_edges.csv")
+        edges_dir = edges_dir or "."
+        self.all_bus_edges = pd.read_csv(os.path.join(edges_dir, "bus_edges.csv"))
+        self.walk_edges = pd.read_csv(os.path.join(edges_dir, "walk_edges.csv"))
 
         self.trip_to_route = self.trips.set_index("trip_id")["route_id"].to_dict()
         self.all_bus_edges["route_id"] = self.all_bus_edges["trip_id"].map(self.trip_to_route)
@@ -62,6 +64,22 @@ class TransitEngine:
         self._bus_graph_cache = None
         self._walk_graph_cache = None
         self._rev_bus_graph_cache = None
+
+    def session_copy(self):
+        """読み込んだデータは共有し、状態だけを分けた複製を返す
+
+        Streamlit の cache_resource は全訪問者で同じオブジェクトを共有する。
+        そのまま set_day_type() や scenario() を呼ぶと、ある訪問者の処方計算中に
+        別の訪問者の診断がその差し替えたエッジで計算される（室蘭の平日9時で
+        空白人口 19,867人が 77,690人と表示されるのを再現した）。
+
+        状態の変更はすべて属性の再代入で行っているので、浅いコピーで分離できる。
+        その場で書き換えるのは路線長のキャッシュ（dict）だけなので、これだけ複製する。
+        GTFS・全便エッジ・構築済みグラフは読み取り専用として共有し、メモリを抑える。
+        """
+        c = copy.copy(self)
+        c._route_length_cache = dict(self._route_length_cache)
+        return c
 
     def set_day_type(self, day_type):
         """ダイヤ種別（平日/土曜/日祝）を切り替える

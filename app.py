@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 import folium
 import os
-import zipfile
-import tempfile
-import shutil
 import pydeck as pdk
 from streamlit_folium import st_folium
 from transit_engine import TransitEngine
 from population import PopulationData, FacilityData
-from build_network import build_network
 from blank_area import BlankAreaAnalyzer, aggregate_to_500m
 from prescription import Plan, compare, rank_routes_by_blank_coverage
 import policy_report
+import session_data
 
 st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と処方", layout="wide")
 st.title("クウハクスコープ")
@@ -27,7 +24,11 @@ st.caption(
 # ===== データ管理 =====
 DATA_DIR = "."
 GTFS_DIR_DEFAULT = "gtfs_data"        # デフォルト（室蘭）
-GTFS_DIR_CUSTOM = "gtfs_data_custom"  # アップロード用
+
+# データを差し替えたら消す計算結果。残すと、別の都市の地図や表が
+# 新しいデータの結果として表示される。
+RESULT_KEYS = ("result_map", "result_stats", "animation_results", "animation_hour",
+               "blank_result", "presc_table", "presc_hour_used", "presc_doc_refined")
 
 # セッション状態の初期化
 if "data_source" not in st.session_state:
@@ -45,10 +46,6 @@ def load_engine():
     return TransitEngine(gtfs_dir=GTFS_DIR_DEFAULT)
 
 @st.cache_resource
-def load_custom_engine(gtfs_dir):
-    return TransitEngine(gtfs_dir=gtfs_dir)
-
-@st.cache_resource
 def load_population():
     if os.path.exists("100m_mesh_pop2020_01205室蘭市.csv"):
         return PopulationData("100m_mesh_pop2020_01205室蘭市.csv")
@@ -60,18 +57,41 @@ def load_facilities():
         return FacilityData("facilities.csv")
     return None
 
-@st.cache_resource
-def load_blank_analyzer(_engine, _pop_data, max_walk_m, walk_speed):
-    # メッシュ×バス停の徒歩対応表は徒歩条件ごとに1度だけ作れば足りる
-    return BlankAreaAnalyzer(_engine, _pop_data,
-                             max_walk_m=max_walk_m, walk_speed_m_min=walk_speed)
+def get_blank_analyzer(engine, pop_data, max_walk_m, walk_speed):
+    """この訪問者のエンジンに結びついた空白診断器を返す
 
-# デフォルトデータをロード
+    以前は cache_resource で全訪問者が共有していたが、引数名の先頭が _ の
+    エンジンと人口はキャッシュのキーに入らない。そのため別の都市を
+    アップロードしても室蘭のエンジンに結びついた診断器が返っていた。
+    徒歩対応表の構築は1秒未満なので、訪問者ごとに持てば足りる。
+    """
+    cache = st.session_state.setdefault("analyzers", {})
+    key = (st.session_state.get("data_version", 0), max_walk_m, walk_speed)
+    if key not in cache:
+        cache[key] = BlankAreaAnalyzer(engine, pop_data,
+                                       max_walk_m=max_walk_m, walk_speed_m_min=walk_speed)
+    return cache[key]
+
+
+def work_dir():
+    """この訪問者のアップロードを置く一時ディレクトリ"""
+    if not st.session_state.get("work_dir") or not os.path.isdir(st.session_state.work_dir):
+        st.session_state.work_dir = session_data.new_work_dir()
+    return st.session_state.work_dir
+
+
+def data_changed():
+    """データを差し替えたら、古いデータで作った結果と診断器を捨てる"""
+    st.session_state.data_version = st.session_state.get("data_version", 0) + 1
+    st.session_state.analyzers = {}
+    for k in RESULT_KEYS:
+        st.session_state.pop(k, None)
+
+
+# デフォルトデータをロード。エンジンは読み込み済みデータを共有しつつ、
+# ダイヤ種別やシナリオの状態は訪問者ごとに分けたコピーを使う。
 if st.session_state.engine is None:
-    if os.path.exists(GTFS_DIR_CUSTOM) and os.path.exists("bus_edges_custom.csv"):
-        st.session_state.engine = load_custom_engine(GTFS_DIR_CUSTOM)
-    else:
-        st.session_state.engine = load_engine()
+    st.session_state.engine = load_engine().session_copy()
 if st.session_state.pop_data is None:
     st.session_state.pop_data = load_population()
 if st.session_state.facility_data is None:
@@ -92,8 +112,9 @@ with st.sidebar.expander("📂 データ設定", expanded=False):
             fac_df = pd.read_csv(uploaded_facilities)
             required = {"name", "type", "latitude", "longitude"}
             if required.issubset(set(fac_df.columns)):
-                fac_df.to_csv("uploaded_facilities.csv", index=False)
-                st.session_state.facility_data = FacilityData("uploaded_facilities.csv")
+                path = os.path.join(work_dir(), "uploaded_facilities.csv")
+                fac_df.to_csv(path, index=False)
+                st.session_state.facility_data = FacilityData(path)
                 facility_data = st.session_state.facility_data
                 st.success(f"施設データ読み込み完了: {len(fac_df)}件")
             else:
@@ -109,8 +130,17 @@ with st.sidebar.expander("📂 データ設定", expanded=False):
         try:
             pop_df = pd.read_csv(uploaded_pop)
             if "Meshcode" in pop_df.columns and "PopT" in pop_df.columns:
-                pop_df.to_csv("uploaded_population.csv", index=False)
-                st.session_state.pop_data = PopulationData("uploaded_population.csv")
+                # 元のファイル名で保存する（政策文書の自治体名をここから取る）
+                path = os.path.join(work_dir(), session_data.safe_filename(
+                    uploaded_pop.name, "uploaded_population.csv"))
+                pop_df.to_csv(path, index=False)
+                # アップロード欄のファイルは再実行のたびに渡ってくるので、
+                # 中身が変わったときだけ読み直す（毎回だと計算結果が消え続ける）
+                source = (uploaded_pop.name, uploaded_pop.size)
+                if st.session_state.get("pop_source") != source:
+                    st.session_state.pop_data = PopulationData(path)
+                    st.session_state.pop_source = source
+                    data_changed()
                 pop_data = st.session_state.pop_data
                 st.success(f"人口データ読み込み完了: {len(pop_df)}メッシュ")
             else:
@@ -126,67 +156,29 @@ with st.sidebar.expander("📂 データ設定", expanded=False):
         if st.button("GTFSデータを適用（数分かかります）"):
             with st.spinner("GTFSデータを展開・ネットワーク構築中..."):
                 try:
-                    # zipを展開
-                    tmp_dir = "uploaded_gtfs"
-                    if os.path.exists(tmp_dir):
-                        shutil.rmtree(tmp_dir)
-                    os.makedirs(tmp_dir, exist_ok=True)
-                    with zipfile.ZipFile(uploaded_gtfs, "r") as z:
-                        z.extractall(tmp_dir)
-
-                    # GTFSファイルを探す（サブフォルダ対応）
-                    gtfs_path = tmp_dir
-                    for root, dirs, files in os.walk(tmp_dir):
-                        if "stops.txt" in files and "stop_times.txt" in files:
-                            gtfs_path = root
-                            break
-
-                    # カスタムGTFSフォルダに展開（デフォルトを上書きしない）
-                    os.makedirs(GTFS_DIR_CUSTOM, exist_ok=True)
-                    for fname in ["stops.txt", "stop_times.txt", "routes.txt",
-                                  "trips.txt", "calendar.txt", "shapes.txt",
-                                  "agency.txt", "feed_info.txt"]:
-                        src = os.path.join(gtfs_path, fname)
-                        dst = os.path.join(GTFS_DIR_CUSTOM, fname)
-                        if os.path.exists(src):
-                            shutil.copy2(src, dst)
-
-                    # カスタムエッジファイルを生成
-                    build_network(gtfs_path, DATA_DIR)
-                    shutil.copy2("bus_edges.csv", "bus_edges_custom.csv")
-                    shutil.copy2("walk_edges.csv", "walk_edges_custom.csv")
-                    # デフォルトエッジに戻す
-                    shutil.copy2("bus_edges_default.csv", "bus_edges.csv")
-                    shutil.copy2("walk_edges_default.csv", "walk_edges.csv")
-
-                    # エンジン再読み込み（カスタム）
-                    st.cache_resource.clear()
-                    st.session_state.engine = TransitEngine(gtfs_dir=GTFS_DIR_CUSTOM)
-                    engine = st.session_state.engine
+                    new_engine = session_data.build_uploaded_engine(uploaded_gtfs, work_dir())
+                    st.session_state.engine = new_engine.session_copy()
+                    st.session_state.gtfs_label = session_data.safe_filename(uploaded_gtfs.name)
+                    data_changed()
                     st.success("GTFSデータ適用完了！ネットワークを再構築しました。")
                     st.rerun()
                 except Exception as e:
                     st.error(f"GTFSデータ適用エラー: {e}")
 
-    # デフォルトデータに戻すボタン
-    if os.path.exists(GTFS_DIR_CUSTOM):
+    # デフォルトデータに戻すボタン（この訪問者の表示だけが戻る）
+    if st.session_state.get("gtfs_label"):
         st.divider()
         if st.button("🔄 デフォルト（室蘭）に戻す"):
-            if os.path.exists(GTFS_DIR_CUSTOM):
-                shutil.rmtree(GTFS_DIR_CUSTOM)
-            if os.path.exists("bus_edges_custom.csv"):
-                os.remove("bus_edges_custom.csv")
-            if os.path.exists("walk_edges_custom.csv"):
-                os.remove("walk_edges_custom.csv")
-            st.cache_resource.clear()
-            st.session_state.engine = load_engine()
-            engine = st.session_state.engine
+            # 戻すのはGTFSだけ（人口・施設はアップロード欄に残っている限り使い続ける）
+            st.session_state.pop("gtfs_label", None)
+            st.session_state.engine = load_engine().session_copy()
+            data_changed()
             st.success("デフォルトデータに戻しました")
             st.rerun()
 
-# データソース表示
-if os.path.exists(GTFS_DIR_CUSTOM):
-    area_name = "カスタムデータ"
+# データソース表示（共有ディレクトリではなく、この訪問者の状態で判定する）
+if st.session_state.get("gtfs_label"):
+    area_name = f"アップロードしたデータ（{st.session_state.gtfs_label}）"
 else:
     area_name = "室蘭市 道南バス"
 st.caption(f"{area_name} GTFSデータに基づくシミュレーション")
@@ -1035,7 +1027,7 @@ if mode == "時間空白診断（3D）":
     elif not blank_dest_ids:
         st.info("サイドバーで生活拠点のバス停を1つ以上選んでください。")
     else:
-        analyzer = load_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
+        analyzer = get_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
 
         def run_blank_diagnosis():
             hours = list(range(5, 23))
@@ -1183,7 +1175,7 @@ if mode == "処方（改善施策）":
     elif not blank_dest_ids:
         st.info("サイドバーで生活拠点のバス停を1つ以上選んでください。")
     else:
-        analyzer = load_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
+        analyzer = get_blank_analyzer(engine, pop_data, blank_walk_m, blank_walk_speed)
         diag = analyzer.diagnose(blank_dest_ids, presc_hour * 3600, max_time_sec)
         summary = analyzer.summarize(diag)
 
