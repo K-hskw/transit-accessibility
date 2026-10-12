@@ -15,10 +15,11 @@ import session_data
 st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と処方", layout="wide")
 st.title("クウハクスコープ")
 st.caption(
-    "バス停からの距離ではなく、**時刻表**で交通空白を測ります。"
-    "同じ地点でも時間帯・曜日で到達できるかが変わり、距離基準ではそれが見えません。"
-    "室蘭市では休日7時に市の46%が拠点へ着けません。"
-    "左の「① 空白を診る → ② 壊れ方を試す → ③ 手を打つ」の順に進めます。"
+    "バス停からの距離ではなく、**時刻表**をもとに交通空白を測ります。"
+    "同じ場所でも、時間帯や曜日によって拠点に着けるかどうかは変わります。"
+    "距離だけで判断すると、この違いは見えません。"
+    "たとえば室蘭市では、休日に朝7時までに拠点へ着けない人が市民の46%にのぼります。"
+    "サイドメニューで「① 空白を見つける → ② 廃止・減便の影響を見る → ③ 改善策を比べる」の順に進めてください。"
 )
 
 # ===== データ管理 =====
@@ -192,10 +193,10 @@ if "result_stats" not in st.session_state:
 # モードを「診断 → 劣化 → 処方」の3段に整理する。10個を並列に並べると
 # 初見でどこから触ればよいか分からず、核心の時間空白診断が埋もれるため。
 STEPS = {
-    "① 空白を診る": ["時間空白診断（3D）", "時間帯別到達圏", "到達圏のみ",
+    "① 空白を見つける": ["時間空白診断（3D）", "時間帯別到達圏", "到達圏のみ",
                    "集客圏分析", "施設アクセス"],
-    "② 壊れ方を試す": ["路線廃止", "減便", "バス停削除"],
-    "③ 手を打つ": ["処方（改善施策）", "代替路線追加"],
+    "② 廃止・減便の影響を見る": ["路線廃止", "減便", "バス停削除"],
+    "③ 改善策を比べる": ["処方（改善施策）", "代替路線追加"],
 }
 # 出発地点・出発時刻を使うのは「起点から出発する」モードだけ。
 # 時間空白診断と処方は拠点と到着時刻で考えるので、出しても効かない。
@@ -212,7 +213,7 @@ st.sidebar.caption(f"{day_type}ダイヤ: {engine.bus_edges['trip_id'].nunique()
                    f"{len(engine.bus_edges):,}エッジ")
 
 st.sidebar.divider()
-step = st.sidebar.radio("分析の流れ", list(STEPS))
+step = st.sidebar.radio("ステップ", list(STEPS))
 mode = st.sidebar.radio("分析の種類", STEPS[step])
 st.sidebar.divider()
 
@@ -351,16 +352,17 @@ if mode == "代替路線追加":
 
 elif mode in ("時間空白診断（3D）", "処方（改善施策）"):
     # 空白の定義（拠点・徒歩条件）は診断と処方で揃える必要があるので共通化する
-    st.sidebar.markdown("**生活拠点（ここに着けるかで空白を判定）**")
+    st.sidebar.markdown("**生活拠点**")
+    st.sidebar.caption("ここで選んだバス停に制限時間内に着けない地域を「空白」とします。")
     blank_dest_names = st.sidebar.multiselect(
-        "拠点バス停（複数可）", stop_names,
+        "拠点にするバス停（複数可）", stop_names,
         default=[n for n in ["東室蘭駅東口"] if n in stop_names]
     )
     blank_dest_ids = []
     for n in blank_dest_names:
         blank_dest_ids.extend(engine.get_stop_ids_by_name(n))
 
-    blank_walk_m = st.sidebar.slider("メッシュから乗車できる徒歩距離（m）", 200, 1000, 500, step=100)
+    blank_walk_m = st.sidebar.slider("バス停まで歩ける距離（m）", 200, 1000, 500, step=100)
     blank_walk_speed = st.sidebar.radio(
         "徒歩速度", [67, 40],
         format_func=lambda v: "一般 67m/分" if v == 67 else "高齢者 40m/分"
@@ -372,7 +374,8 @@ elif mode in ("時間空白診断（3D）", "処方（改善施策）"):
             format_func=lambda v: f"{v}mメッシュ"
         )
         st.sidebar.caption("100mメッシュは1kmの10等分のため250mには割り切れない。標準メッシュで作れるのは500m（5×5セル）。")
-        blank_elev_scale = st.sidebar.slider("柱の高さ倍率", 1, 20, 6)
+        blank_elev_scale = st.sidebar.slider("柱の高さの表示倍率", 1, 20, 6,
+                                             help="見やすさの調整だけで、計算結果は変わりません。")
     else:
         st.sidebar.markdown("**対象とする時刻**")
         presc_hour = st.sidebar.slider("この時刻までに拠点へ着けるか（時）", 5, 22, 7)
