@@ -1038,6 +1038,7 @@ if mode == "時間空白診断（3D）":
                 "per_hour": per_hour,
                 "blank_hours": blank_hours,
                 "dest_names": list(blank_dest_names),
+                "dest_ids": list(blank_dest_ids),
                 "max_time_min": max_time_min,
                 "walk_m": blank_walk_m,
                 "walk_speed": blank_walk_speed,
@@ -1104,6 +1105,19 @@ if mode == "時間空白診断（3D）":
             time_cells["blank_pop_disp"] = time_cells["blank_pop"].round().astype(int)
             time_cells["blank_elderly_disp"] = time_cells["blank_elderly"].round().astype(int)
             time_cells["time_disp"] = (time_cells["blank_pop"] - time_cells["static_pop"]).round().astype(int)
+            time_cells["tip"] = [
+                f"空白人口 {p:,}人\nうち時間空白 {t:,}人\nうち高齢者 {e:,}人\n"
+                f"時間空白になる時間帯 {int(h)}/{len(result['hours'])}"
+                for p, t, e, h in zip(time_cells["blank_pop_disp"], time_cells["time_disp"],
+                                      time_cells["blank_elderly_disp"], time_cells["blank_hours"])
+            ]
+            base["tip"] = [f"静的空白 {v:,}人（歩ける範囲にバス停がない）" for v in base["static_disp"]]
+
+            # 生活拠点の停留所（計算に使ったもの）。同名の複数ポールはそれぞれ打つ
+            hub_ids = [sid for sid in result.get("dest_ids", []) if sid in engine.stop_coords.index]
+            hub = engine.stop_coords.loc[hub_ids, ["stop_lat", "stop_lon", "stop_name"]]
+            hub = hub.rename(columns={"stop_lat": "lat", "stop_lon": "lon"}).reset_index(drop=True)
+            hub["tip"] = "生活拠点: " + hub["stop_name"].astype(str)
 
             total_pop = float(df_sel["pop"].sum())
             blank_pop = float(df_sel.loc[~df_sel["reachable"], "pop"].sum())
@@ -1125,33 +1139,37 @@ if mode == "時間空白診断（3D）":
             # 灰色の土台（静的空白）の上に、時間空白の柱（暖色・深刻度で色分け）を重ねる
             static_layer = pdk.Layer(
                 "ColumnLayer",
-                data=base[["lon", "lat", "static_pop", "static_disp"]],
+                data=base[["lon", "lat", "static_pop", "tip"]],
                 get_position=["lon", "lat"], get_elevation="static_pop",
                 elevation_scale=blank_elev_scale, radius=radius,
                 get_fill_color=[174, 184, 194, 200], pickable=True, auto_highlight=True,
             )
             time_layer = pdk.Layer(
                 "ColumnLayer",
-                data=time_cells[["lon", "lat", "blank_pop", "blank_pop_disp",
-                                 "blank_elderly_disp", "time_disp", "blank_hours", "r", "g", "b"]],
+                data=time_cells[["lon", "lat", "blank_pop", "tip", "r", "g", "b"]],
                 get_position=["lon", "lat"], get_elevation="blank_pop",
                 elevation_scale=blank_elev_scale, radius=inner,
                 get_fill_color=["r", "g", "b", 220], pickable=True, auto_highlight=True,
             )
+            # 拠点は柱と見分けがつくよう、青い点を地面に打つ（拠点の周りは
+            # 全員が間に合うので柱が立たず、隠れない）
+            hub_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=hub[["lon", "lat", "tip"]],
+                get_position=["lon", "lat"], get_radius=160, radius_min_pixels=6,
+                get_fill_color=[37, 99, 235, 255], stroked=True,
+                get_line_color=[255, 255, 255, 255], line_width_min_pixels=2,
+                pickable=True,
+            )
             st.pydeck_chart(pdk.Deck(
-                layers=[static_layer, time_layer],
+                layers=[static_layer, time_layer, hub_layer],
                 initial_view_state=view,
                 map_style="light",
-                tooltip={"text": "空白人口 {blank_pop_disp}人\n"
-                                 "うち時間空白 {time_disp}人\n"
-                                 "うち高齢者 {blank_elderly_disp}人\n"
-                                 "時間空白になる時間帯 {blank_hours}/" + str(n_hours)},
+                tooltip={"text": "{tip}"},
             ))
 
-            st.caption("灰色の部分は、歩いて行ける範囲にバス停がない人です（時刻に関係なく着けません）。"
-                       "色の付いた部分は、バス停はあるのに時刻表の都合で間に合わない人です。"
-                       "色が濃いほど、1日のうち多くの時間帯で着けない場所です。"
-                       "柱の高さは到着時刻で変わりますが、色は変わりません。")
+            st.caption("灰色：静的空白 ／ 褐色：時間的空白 ／ 柱の高さ：その地点に到達できない人数 ／ "
+                       "青い点：生活拠点")
 
             st.markdown("**時間帯別の空白人口**")
             hourly = pd.DataFrame({
