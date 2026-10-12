@@ -12,15 +12,8 @@ from prescription import Plan, compare, rank_routes_by_blank_coverage
 import policy_report
 import session_data
 
-st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と処方", layout="wide")
+st.set_page_config(page_title="クウハクスコープ｜時間空白の診断と改善策", layout="wide")
 st.title("クウハクスコープ")
-st.caption(
-    "バス停からの距離ではなく、**時刻表**をもとに交通空白を測ります。"
-    "同じ場所でも、時間帯や曜日によって拠点に着けるかどうかは変わります。"
-    "距離だけで判断すると、この違いは見えません。"
-    "たとえば室蘭市では、休日に朝7時までに拠点へ着けない人が市民の46%にのぼります。"
-    "サイドメニューで「① 空白を見つける → ② 廃止・減便シミュレーション → ③ 改善策の比較」の順に進めてください。"
-)
 
 # ===== データ管理 =====
 DATA_DIR = "."
@@ -196,7 +189,7 @@ STEPS = {
     "① 空白を見つける": ["時間空白診断（3D）", "時間帯別到達圏", "到達圏のみ",
                    "集客圏分析", "施設アクセス"],
     "② 廃止・減便シミュレーション": ["路線廃止", "減便", "バス停削除"],
-    "③ 改善策の比較": ["処方（改善施策）", "代替路線追加"],
+    "③ 改善策の比較": ["改善策", "代替路線追加"],
 }
 # 出発地点・出発時刻を使うのは「起点から出発する」モードだけ。
 # 時間空白診断と処方は拠点と到着時刻で考えるので、出しても効かない。
@@ -350,7 +343,7 @@ if mode == "代替路線追加":
     alt_interval = st.sidebar.slider("運行間隔（分）", 10, 120, 30, step=10)
     alt_speed = st.sidebar.slider("平均速度（km/h）", 15, 60, 25, step=5)
 
-elif mode in ("時間空白診断（3D）", "処方（改善施策）"):
+elif mode in ("時間空白診断（3D）", "改善策"):
     # 空白の定義（拠点・徒歩条件）は診断と処方で揃える必要があるので共通化する
     st.sidebar.markdown("**生活拠点**")
     st.sidebar.caption("ここで選んだバス停に制限時間内に着けない地域を「空白」とします。")
@@ -1023,7 +1016,7 @@ if mode == "施設アクセス":
 # ===== 時間空白診断（3Dカラム）モード =====
 if mode == "時間空白診断（3D）":
     st.subheader("時間空白診断")
-    st.caption("柱の高さ＝その時間帯に拠点へ着けない人口。色＝1日のうち何時間帯で空白になるか。")
+    st.caption(f"{blank_mesh_level}m四方ごとに、選んだ到着時刻までに拠点へ着けない人の数を柱の高さで表しています。")
 
     if pop_data is None:
         st.warning("メッシュ人口データが読み込まれていないため、この分析は実行できません。")
@@ -1155,8 +1148,10 @@ if mode == "時間空白診断（3D）":
                                  "時間空白になる時間帯 {blank_hours}/" + str(n_hours)},
             ))
 
-            st.caption("灰色の土台＝静的空白（徒歩圏にバス停なし） ／ "
-                       "暖色の柱＝時間空白。色が濃いほど多くの時間帯で着けない。")
+            st.caption("灰色の部分は、歩いて行ける範囲にバス停がない人です（時刻に関係なく着けません）。"
+                       "色の付いた部分は、バス停はあるのに時刻表の都合で間に合わない人です。"
+                       "色が濃いほど、1日のうち多くの時間帯で着けない場所です。"
+                       "柱の高さは到着時刻で変わりますが、色は変わりません。")
 
             st.markdown("**時間帯別の空白人口**")
             hourly = pd.DataFrame({
@@ -1168,9 +1163,9 @@ if mode == "時間空白診断（3D）":
             }).set_index("時")
             st.bar_chart(hourly)
 
-# ===== 処方（改善施策）モード =====
-if mode == "処方（改善施策）":
-    st.subheader("処方：どの施策が空白を減らすか")
+# ===== 改善策モード =====
+if mode == "改善策":
+    st.subheader("どの改善策が空白を減らすか")
     st.caption("診断で見つけた時間空白に対し、増便とダイヤシフトの効果を同じ指標（空白人口）で比較します。")
 
     if pop_data is None:
@@ -1325,7 +1320,7 @@ if mode == "処方（改善施策）":
                             st.markdown(refined)
 
 # ===== 結果表示 =====
-if mode not in ("時間空白診断（3D）", "処方（改善施策）") and st.session_state.result_map is not None:
+if mode not in ("時間空白診断（3D）", "改善策") and st.session_state.result_map is not None:
     col1, col2 = st.columns([3, 1])
 
     with col1:
