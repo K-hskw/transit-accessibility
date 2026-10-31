@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>クウハクスコープ 分析のしくみ</title>
+<style>
+@page { size: A4; margin: 16mm 15mm 14mm 15mm; }
+:root{
+  --ink:#151d26; --muted:#55636f; --faint:#8794a1; --line:#d5dce3;
+  --accent:#12557f; --bad:#a8341c; --good:#1c6b50; --panel:#f4f7f9; --code:#eef2f5;
+  --step1:#12557f; --step2:#9a5b13; --step3:#1c6b50;
+}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);background:#fff;
+  font-family:"Yu Gothic","Meiryo","Hiragino Sans",sans-serif;font-size:9.3pt;line-height:1.7}
+h1{font-size:17pt;margin:0 0 2mm}
+.sub{color:var(--muted);font-size:9.6pt;margin:0 0 1mm}
+.meta{color:var(--faint);font-size:8pt;margin:0}
+header{border-bottom:2px solid var(--accent);padding-bottom:3.5mm;margin-bottom:5mm}
+h2{font-size:12pt;margin:7mm 0 2.5mm;padding-left:2.2mm;border-left:3.5px solid var(--accent)}
+h2.s1{border-left-color:var(--step1)} h2.s2{border-left-color:var(--step2)} h2.s3{border-left-color:var(--step3)}
+h3{font-size:10.4pt;margin:5mm 0 1.5mm;color:var(--accent)}
+h2.s2 ~ h3{color:var(--step2)}
+h2.s3 ~ h3{color:var(--step3)}
+h4{font-size:9.2pt;margin:2.6mm 0 .8mm;color:var(--muted)}
+p{margin:0 0 1.8mm}
+ul,ol{margin:0 0 2mm;padding-left:4.8mm}
+li{margin-bottom:.8mm}
+table{border-collapse:collapse;width:100%;margin:1.5mm 0 2.5mm;font-size:8.5pt}
+th,td{border-bottom:1px solid var(--line);padding:1.2mm 1.8mm;text-align:left;vertical-align:top}
+th{background:var(--panel);color:var(--muted);font-weight:600;border-bottom:1.4px solid var(--line)}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.box{background:var(--panel);border-left:3px solid var(--accent);padding:2mm 2.8mm;margin:2mm 0}
+.box.warn{border-left-color:var(--bad)}
+.box p:last-child,.box ul:last-child{margin-bottom:0}
+.k{font-weight:700}
+.bad{color:var(--bad);font-weight:600}
+.small{font-size:8.3pt;color:var(--muted)}
+.term{font-weight:700;color:var(--accent)}
+.card{border:1px solid var(--line);border-radius:3px;padding:2.4mm 3mm 1mm;margin:2mm 0 3mm}
+.card dl{display:grid;grid-template-columns:22mm 1fr;gap:.6mm 3mm;margin:0}
+.card dt{color:var(--muted);font-weight:600;font-size:8.5pt;padding-top:.3mm}
+.card dd{margin:0 0 1mm}
+.card ol{margin:0;padding-left:4.5mm}
+.chip{display:inline-block;font-size:7.6pt;padding:.1mm 1.6mm;border-radius:6px;margin-right:1mm;
+  border:1px solid currentColor;vertical-align:1px;font-weight:600}
+.dot{display:inline-block;width:2.6mm;height:2.6mm;border-radius:50%;vertical-align:-.3mm;margin-right:.6mm}
+figure{margin:2mm 0 3mm}
+figcaption{font-size:8.2pt;color:var(--muted);margin-top:1mm}
+svg text{font-family:"Yu Gothic","Meiryo",sans-serif}
+h2,h3,h4{break-after:avoid;page-break-after:avoid}
+tr,.box,li,figure,.card{break-inside:avoid;page-break-inside:avoid}
+footer{margin-top:6mm;padding-top:2mm;border-top:1px solid var(--line);color:var(--faint);font-size:7.6pt}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>クウハクスコープ 分析のしくみ</h1>
+  <p class="sub">10種類の分析が、それぞれ何をどう計算しているか</p>
+  <p class="meta">2026-10-30（10-12版を改訂） ／ 公開アプリ: https://transit-accessibility-aik9qbme9ej2ue8wamnpvf.streamlit.app ／ 数値の例は室蘭市・道南バス（2026年10月1日改正ダイヤ）の平日</p>
+</header>
+
+<div class="box">
+  <p><span class="k">この資料の読み方</span>：10種類の分析は、ばらばらの仕組みではありません。<span class="k">すべて「時刻表をもとに、何時にどこへ着けるかを調べる」1つの計算</span>の上に乗っています。まず第1章でその共通の計算を説明し、第2〜4章で各分析がそれをどう使っているかを説明します。専門用語は、初めて出てきたところで説明します。</p>
+</div>
+
+<h2>1. すべての分析の土台</h2>
+
+<figure>
+<svg viewBox="0 0 640 118" width="100%" role="img" aria-label="時刻表から各分析までの流れ">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8794a1"/></marker></defs>
+  <g font-size="11">
+    <rect x="4" y="22" width="112" height="58" rx="4" fill="#f4f7f9" stroke="#d5dce3"/>
+    <text x="60" y="44" text-anchor="middle" font-weight="700" fill="#151d26">バスの時刻表</text>
+    <text x="60" y="60" text-anchor="middle" fill="#55636f" font-size="9.5">GTFS-JP（公開データ）</text>
+    <text x="60" y="73" text-anchor="middle" fill="#55636f" font-size="9.5">停留所2,182・平日808便</text>
+    <line x1="118" y1="51" x2="146" y2="51" stroke="#8794a1" stroke-width="1.4" marker-end="url(#ar)"/>
+    <rect x="150" y="22" width="130" height="58" rx="4" fill="#f4f7f9" stroke="#d5dce3"/>
+    <text x="215" y="44" text-anchor="middle" font-weight="700" fill="#151d26">路線のつながり</text>
+    <text x="215" y="60" text-anchor="middle" fill="#55636f" font-size="9.5">便ごとの「何時発→何時着」</text>
+    <text x="215" y="73" text-anchor="middle" fill="#55636f" font-size="9.5">＋300m以内の徒歩乗換</text>
+    <line x1="282" y1="51" x2="310" y2="51" stroke="#8794a1" stroke-width="1.4" marker-end="url(#ar)"/>
+    <rect x="314" y="14" width="150" height="74" rx="4" fill="#e6eff5" stroke="#12557f" stroke-width="1.4"/>
+    <text x="389" y="38" text-anchor="middle" font-weight="700" fill="#12557f">到達時刻の計算</text>
+    <text x="389" y="55" text-anchor="middle" fill="#151d26" font-size="9.5">何時に出たら、どこに</text>
+    <text x="389" y="68" text-anchor="middle" fill="#151d26" font-size="9.5">何時に着けるか</text>
+    <text x="389" y="81" text-anchor="middle" fill="#55636f" font-size="8.5">（時刻依存ダイクストラ法）</text>
+    <line x1="466" y1="51" x2="494" y2="51" stroke="#8794a1" stroke-width="1.4" marker-end="url(#ar)"/>
+    <rect x="498" y="4" width="138" height="30" rx="4" fill="#fff" stroke="#12557f"/>
+    <text x="567" y="23" text-anchor="middle" fill="#12557f" font-size="10">① 空白を見つける（5種）</text>
+    <rect x="498" y="38" width="138" height="30" rx="4" fill="#fff" stroke="#9a5b13"/>
+    <text x="567" y="57" text-anchor="middle" fill="#9a5b13" font-size="10">② 廃止・減便（3種）</text>
+    <rect x="498" y="72" width="138" height="30" rx="4" fill="#fff" stroke="#1c6b50"/>
+    <text x="567" y="91" text-anchor="middle" fill="#1c6b50" font-size="10">③ 改善策の比較（2種）</text>
+  </g>
+</svg>
+<figcaption>図1　時刻表を「路線のつながり」に変え、その上で到達時刻を計算する。10種類の分析はすべてこの計算を使う。</figcaption>
+</figure>
+
+<h3>1.1 時刻表を「路線のつながり」に変える</h3>
+<p>バスの時刻表は、国が定めた共通形式（<span class="term">GTFS-JP</span>）でオープンデータとして公開されています。アプリはこれを読み込み、次の2種類の「つながり」に変換します。</p>
+<ul>
+  <li><span class="k">バスの区間</span>：「〇〇便は、Aを8:20に出てBに8:24に着く」という、便1本・区間1つごとの記録。平日だけで32,536区間あります。<span class="k">「AとBはつながっている」ではなく「Aを8:20に出る便がある」</span>という形で持つのがポイントです</li>
+  <li><span class="k">徒歩の乗り換え</span>：300m以内にある停留所どうしは歩いて乗り換えられるものとします（分速67m＝一般的な歩行速度）</li>
+</ul>
+
+<h3>1.2 何時にどこへ着けるかを計算する（時刻依存ダイクストラ法）</h3>
+<p>乗換案内アプリと同じことを、<span class="k">すべての停留所について一度に</span>行います。乗換案内が「A駅からB駅まで」を1つ答えるのに対し、このアプリは「A停留所を8:00に出たら、市内のすべての停留所にそれぞれ何時に着けるか」を答えます。</p>
+<p>普通の最短経路の計算（<span class="term">ダイクストラ法</span>）は「距離が短い順」に道をたどります。バスの場合は、<span class="k">何時に停留所に着いたかで、次に乗れる便が変わります</span>。8:15に着けば8:20発に乗れますが、8:25に着くと次は9:00発まで待つことになります。そこで「到着時刻が早い順」に停留所を確定していく形に変えたものが<span class="term">時刻依存ダイクストラ法</span>です。</p>
+
+<figure>
+<table>
+  <colgroup><col style="width:9mm"><col><col style="width:44mm"></colgroup>
+  <tr><th>手順</th><th>やっていること</th><th>例（Aを8:00に出発）</th></tr>
+  <tr><td>1</td><td>出発停留所に「8:00に居る」と記録する</td><td>A：8:00</td></tr>
+  <tr><td>2</td><td>まだ確定していない停留所のうち、<span class="k">いちばん早く着ける</span>ものを確定する</td><td>A を確定</td></tr>
+  <tr><td>3</td><td>確定した停留所から出る便のうち、<span class="k">その時刻以降に出るもの</span>に乗った場合の到着時刻を調べ、今までの記録より早ければ書き換える。歩いて行ける停留所も同じように調べる</td><td>A 8:05発→B 8:12着<br>A 8:10発→C 8:30着</td></tr>
+  <tr><td>4</td><td>制限時間（例：60分）を超えるか、調べる停留所がなくなるまで 2〜3 を繰り返す</td><td>次に B（8:12）を確定 …</td></tr>
+</table>
+<figcaption>表1　計算の手順。待ち時間は「その時刻以降に出る便にしか乗れない」という条件から自然に生まれるので、別に計算する必要がない。</figcaption>
+</figure>
+
+<p class="small">決まりごと：歩いて乗り換えたあとに、さらに歩いて乗り換えることはできません（これを許すと、300mの徒歩をつないで市内を歩くだけで横断できてしまうため）。急行が各駅停車を追い越す場合も、便を1本ずつ調べているので早く着く方が選ばれます。</p>
+
+<h3>1.3 逆向きに計算する（逆方向探索）</h3>
+<p>1.2 は「ここを何時に出たら、どこに何時に着けるか」です。これを逆にすると「<span class="k">ここに何時までに着くには、どこを何時までに出ればよいか</span>」がわかります。手順は同じで、時刻表を後ろからたどり、「出発時刻が遅い順」に確定していきます。</p>
+
+<figure>
+<svg viewBox="0 0 640 96" width="100%" role="img" aria-label="順方向と逆方向の違い">
+  <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#12557f"/></marker>
+  <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1c6b50"/></marker></defs>
+  <g font-size="10.5">
+    <text x="4" y="16" font-weight="700" fill="#12557f">順方向（出発地から広げる）</text>
+    <circle cx="70" cy="52" r="9" fill="#12557f"/><text x="70" y="80" text-anchor="middle" fill="#151d26">出発地</text>
+    <g stroke="#12557f" stroke-width="1.3" fill="none">
+      <line x1="80" y1="48" x2="180" y2="30" marker-end="url(#ar2)"/><line x1="80" y1="52" x2="190" y2="54" marker-end="url(#ar2)"/><line x1="80" y1="57" x2="180" y2="78" marker-end="url(#ar2)"/>
+    </g>
+    <circle cx="190" cy="28" r="5" fill="#9fb8cb"/><circle cx="200" cy="54" r="5" fill="#9fb8cb"/><circle cx="190" cy="80" r="5" fill="#9fb8cb"/>
+    <text x="222" y="38" fill="#55636f" font-size="9.5">何時に着けるか</text>
+    <text x="222" y="52" fill="#55636f" font-size="9.5">（到達圏・施設アクセス・</text>
+    <text x="222" y="66" fill="#55636f" font-size="9.5">廃止・減便シミュレーション）</text>
+
+    <text x="350" y="16" font-weight="700" fill="#1c6b50">逆方向（目的地から戻る）</text>
+    <circle cx="370" cy="28" r="5" fill="#a9cbb9"/><circle cx="380" cy="54" r="5" fill="#a9cbb9"/><circle cx="370" cy="80" r="5" fill="#a9cbb9"/>
+    <g stroke="#1c6b50" stroke-width="1.3" fill="none">
+      <line x1="376" y1="30" x2="476" y2="48" marker-end="url(#ar3)"/><line x1="386" y1="54" x2="474" y2="52" marker-end="url(#ar3)"/><line x1="376" y1="78" x2="476" y2="57" marker-end="url(#ar3)"/>
+    </g>
+    <circle cx="488" cy="52" r="9" fill="#1c6b50"/><text x="488" y="80" text-anchor="middle" fill="#151d26">目的地</text>
+    <text x="508" y="38" fill="#55636f" font-size="9.5">何時までに出れば</text>
+    <text x="508" y="52" fill="#55636f" font-size="9.5">間に合うか（集客圏・</text>
+    <text x="508" y="66" fill="#55636f" font-size="9.5">時間空白診断・改善策）</text>
+  </g>
+</svg>
+<figcaption>図2　順方向は「出発地から、どこまで行けるか」。逆方向は「目的地へ、どこから来られるか」。</figcaption>
+</figure>
+
+<p>逆方向の利点は計算量です。「市内のすべての場所から病院へ行けるか」を順方向で調べると、場所の数だけ計算が要ります。逆方向なら<span class="k">病院から1回たどるだけで、すべての場所について答えが出ます</span>。時間空白診断で、3,079か所×216通りの到着時刻（5〜22時台を5分刻み）の判定が1秒ほどで終わるのはこのためです。</p>
+
+<h3>1.4 人口とつなぐ</h3>
+<p>人口は<span class="term">簡易100mメッシュ人口</span>を使います。地図を100m四方のマスに区切り、令和2年国勢調査の250mメッシュ人口を、マスの中の建物面積に応じて按分した推計値です（作成：西澤明、東京大学空間情報科学研究センター、CC BY）。1マスごとの値は実際の人数そのものではないため、広い範囲で合計して使います。室蘭市は3,079マス、83,050人です。停留所と人口の結びつけ方は、分析によって2通りあります。</p>
+<table>
+  <tr><th>方式</th><th>考え方</th><th>使う分析</th></tr>
+  <tr><td><span class="k">停留所の周り300m</span></td><td>計算でたどり着けた停留所から半径300m以内のマスの人口を数える（重複は1回だけ）</td><td>路線廃止・減便・バス停削除・代替路線追加・集客圏分析</td></tr>
+  <tr><td><span class="k">住まいから歩いて500m</span></td><td>マスの中心から歩いて行ける停留所（既定500m）を探し、そこまでの徒歩時間も含めて間に合うかを判定する</td><td>時間空白診断・改善策</td></tr>
+</table>
+<p class="small">後者のほうが「住んでいる人が実際にバス停まで歩く」ことまで計算に入るので、空白の判定には後者を使っています。前者は以前からある分析で使っている方式です。</p>
+
+<h3>1.5 平日・土曜・日祝の切り替え</h3>
+<p>時刻表には曜日ごとの運行パターンが書かれています。サイドメニューの「ダイヤ」を切り替えると、その曜日に走る便（平日808便・土曜672便・日祝667便）だけを使って、すべての分析を計算し直します。</p>
+
+<h3>1.6 時刻は5分刻みで動かし、時間帯ごとに平均する</h3>
+<p>同じ場所でも、<span class="k">到着時刻が数分違うだけで、間に合う便があるかが変わります</span>。例えば休日に東室蘭駅東口へ着きたいとき、間に合わない人は7:00着なら市の46.1%、7:35着なら11.9%です。そこで、時刻を毎時00分の1点だけで測るのをやめ、<span class="k">5分刻み（1日216通り）で計算し、時間帯（例：7時台＝7:00〜7:55着の12通り）ごとに平均</span>します。休日7時台の平均は27.9%です。画面と資料では、平均とあわせて時間帯の中の幅（最小〜最大）も示します。</p>
+<p class="small">以前の版は毎時00分の1点で測っていました。「休日7時に46.1%」は7時台で最も悪い1分の値で、「5時台と10時台で到達できる停留所が27.6倍違う」は始発前の5:00発を5時台の代表にした値でした（5分刻みの平均では約7倍）。</p>
+
+<h2 class="s1">2. ① 空白を見つける</h2>
+<p>今の時刻表のままで、どこに・いつ・何人が困っているかを調べる分析です。時刻表は変えません。</p>
+
+<h3>時間空白診断（3D）</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>生活拠点（例：東室蘭駅東口）に、指定の時間帯に着けない人が<span class="k">どこに何人いるか</span>。このアプリの中心となる分析です</dd>
+  <dt>設定</dt><dd>生活拠点のバス停、制限時間（既定60分）、バス停まで歩ける距離（既定500m）、歩く速さ（一般／高齢者）</dd>
+  <dt>しくみ</dt><dd><ol>
+    <li>生活拠点から<span class="k">逆方向</span>にたどり、すべての停留所について「何時までに出れば間に合うか」を求める</li>
+    <li>人口のマスごとに、歩いて行ける停留所の中で一番遅く出られるものを選び、そこまでの徒歩時間を引く</li>
+    <li>それが「到着時刻 − 制限時間」より前なら間に合わない＝<span class="k">空白</span>と判定する。つまり<span class="k">到着時刻の60分前以降に家を出て間に合うか</span>を見ており、早く着いて拠点で待つ時間も60分に含む（始発で6時に着いて9時まで待つ人を「9時に着ける」と数えると、時間空白が見えなくなるため）。そのため到着時刻を遅らせても空白が減るとは限らない（休日 7:45着17.5% → 8:00着27.5%）</li>
+    <li>これを到着時刻5:00〜22:55の5分刻み（216通り）で行い、時間帯ごとに平均する（1.6参照）。マスごとに「1日のうち何時間着けないか」も数える</li>
+  </ol></dd>
+  <dt>空白の種類</dt><dd><span class="k">静的空白</span>：歩ける範囲にバス停が1つもない（時刻に関係なく着けない）。<br><span class="k">時間空白</span>：バス停はあるのに、時刻表の都合で間に合わない。<span class="k">このアプリが測りたいのはこちらです</span></dd>
+  <dt>地図の見方</dt><dd>500m四方ごとの柱。高さ＝その時間帯に着けない人数（平均）、灰色＝静的空白、暖色＝時間空白（色が濃いほど1日のうち着けない時間が長い）、青い点＝生活拠点。到着時刻ごとの空白人口を5分刻みの折れ線でも示す</dd>
+</dl></div>
+
+<h3>時間帯別到達圏</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>同じ停留所から出発しても、<span class="k">時間帯によって行ける範囲がどれだけ変わるか</span></dd>
+  <dt>設定</dt><dd>出発バス停、制限時間</dd>
+  <dt>しくみ</dt><dd>出発時刻を5:00〜22:55の5分刻みで変えながら、<span class="k">順方向</span>の計算を216回行う。時間帯ごとに、各停留所へ何通りの出発時刻から行けるかを数える。行ける停留所の数を5分刻みの折れ線にする</dd>
+  <dt>地図の見方</dt><dd><span class="dot" style="background:#3a9a4a"></span>その時間帯ならいつ出ても行ける <span class="dot" style="background:#e8902c"></span>半分以上の出発時刻で行ける <span class="dot" style="background:#d33d2b"></span>出発時刻しだい。例：室蘭駅前から60分以内に行ける停留所は、5時台の出発で平均35か所（出発時刻により10〜93）、10時台で平均238か所（132〜329）で、約7倍の差</dd>
+</dl></div>
+
+<h3>到達圏のみ</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>ある停留所をある時刻に出たとき、<span class="k">制限時間内にどこまで行けるか</span>と、それぞれの乗り継ぎ経路</dd>
+  <dt>設定</dt><dd>出発バス停、出発時刻、制限時間</dd>
+  <dt>しくみ</dt><dd><span class="k">順方向</span>の計算を1回行う。各停留所に「どの便で来たか」も記録しておき、そこから逆にたどって経路を復元する</dd>
+  <dt>地図の見方</dt><dd>所要時間で色分け：<span class="dot" style="background:#3a9a4a"></span>15分以内 <span class="dot" style="background:#e8902c"></span>30分以内 <span class="dot" style="background:#d33d2b"></span>45分以内 <span class="dot" style="background:#8a1d14"></span>それ以上。停留所をタップすると乗り継ぎ経路が出る</dd>
+</dl></div>
+
+<h3>集客圏分析</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>ある施設（病院・学校など）に指定の時刻までに着くには、<span class="k">どこから来られるか</span>。施設側から見た「お客さんが来られる範囲」です</dd>
+  <dt>設定</dt><dd>施設の種類と施設名、到着時刻、制限時間</dd>
+  <dt>しくみ</dt><dd><ol>
+    <li>施設から500m以内で一番近いバス停を探す（なければ分析できない）</li>
+    <li>そのバス停から<span class="k">逆方向</span>にたどり、各停留所の「何時までに出れば間に合うか」を求める</li>
+    <li>たどり着けた停留所の周り300mに住む人口を数える</li>
+  </ol></dd>
+  <dt>地図の見方</dt><dd>所要時間で色分け（15分・30分・45分で区切り）。停留所をタップすると、そこを何時までに出れば間に合うかが出る</dd>
+</dl></div>
+
+<h3>施設アクセス</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>ある停留所から出発して、<span class="k">制限時間内にどの施設へ行けるか</span>（国土数値情報の医療機関・学校など142件）</dd>
+  <dt>設定</dt><dd>出発バス停、出発時刻、制限時間、施設の種類、歩く速さ</dd>
+  <dt>しくみ</dt><dd><ol>
+    <li>出発停留所から<span class="k">順方向</span>の計算を1回行う</li>
+    <li>各施設について、500m以内にあるすべてのバス停で「バスで着ける時刻＋そこから施設まで歩く時間（選んだ歩く速さで計算）」を求め、最も早いものを施設までの所要時間とする</li>
+    <li>所要時間が制限時間以内なら「行ける」とする（歩く時間も制限時間に含む）</li>
+  </ol></dd>
+  <dt>地図の見方</dt><dd>行ける施設と行けない施設を一覧と地図で表示する。500m以内にバス停がない施設は対象外</dd>
+</dl></div>
+
+<h2 class="s2">3. ② 廃止・減便シミュレーション</h2>
+<p>時刻表を<span class="k">仮に書き換えて</span>、その前後で行ける範囲を比べる分析です。3つとも同じ流れで動きます。</p>
+<div class="box">
+  <p><span class="k">共通の流れ</span>：① 今の時刻表で順方向の計算をする → ② 時刻表から便や停留所を取り除いた「仮の時刻表」を作る → ③ 仮の時刻表で同じ計算をする → ④ 停留所ごとに前後を比べる</p>
+  <p><span class="dot" style="background:#d33d2b"></span><span class="k">到達不能</span>：前は行けたのに行けなくなった ／ <span class="dot" style="background:#e8902c"></span><span class="k">悪化</span>：行けるが、所要時間が指定の分数（悪化閾値、既定1分）以上延びた ／ <span class="dot" style="background:#9aa3ab"></span><span class="k">影響なし</span></p>
+  <p>あわせて、行けなくなった停留所の周り300mに住み、<span class="k">ほかに行ける停留所もない人</span>を「影響を受ける人口」として数えます（近くに別の停留所があれば、その人は影響なしと数えます）。</p>
+</div>
+
+<h3>路線廃止</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>ある路線がなくなったら、どこに行けなくなるか</dd>
+  <dt>設定</dt><dd>廃止する路線（複数同時も可）。出発バス停から<span class="k">直接乗れる路線</span>と、<span class="k">乗り換えで使っている路線</span>に分けて表示する。高速バスは市内交通と性質が違うため選択肢から外している</dd>
+  <dt>仮の時刻表</dt><dd>選んだ路線の便をすべて取り除く</dd>
+</dl></div>
+
+<h3>減便</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>便を減らしたら、行ける範囲や所要時間がどう変わるか</dd>
+  <dt>仮の時刻表</dt><dd>3つの方式から選ぶ。どれも便を<span class="k">方向・経路（停留所の並び）ごとに</span>出発時刻順に並べて間引くので、片方向だけが全廃になることはない。<br>
+    ・<span class="k">半分にする</span>：選んだ路線の便を、方向・経路ごとに1本おきに残す（1本目・3本目…）<br>
+    ・<span class="k">N本に1本残す</span>：選んだ路線の便を、方向・経路ごとにN本ごとに1本だけ残す（Nは2〜6）<br>
+    ・<span class="k">全路線一律</span>：すべての路線で、方向・経路ごとに指定の割合（10〜80%）前後の本数を、1日の中で偏らないよう取り除く。割合を上げると取り除く便が増えるだけで、前の割合で取り除いた便は戻らない。実際に減った便数と割合を表示する（指定との差は1ポイント程度）</dd>
+</dl></div>
+
+<h3>バス停削除</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>あるバス停を廃止したら、どこに影響が出るか</dd>
+  <dt>仮の時刻表</dt><dd>路線は残し、削除したバス停を<span class="k">通過する</span>扱いにする（前後の停留所を直接つなぐ）。そのバス停を使った徒歩乗り換えも取り除き、近くの停留所どうしを歩いてつなぎ直す。徒歩の範囲は300m（都市部の基準）か500m（地方部の基準）から選ぶ</dd>
+</dl></div>
+
+<h2 class="s3">4. ③ 改善策の比較</h2>
+<p>空白を減らすために時刻表をどう変えればよいかを試す分析です。</p>
+
+<h3>改善策</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>増便やダイヤの組み替えで、<span class="k">空白人口が何人減るか</span>と、<span class="k">そのためにどれだけ費用がかかるか</span>を、複数の案で比べる</dd>
+  <dt>設定</dt><dd>生活拠点と、対象とする時間帯（例：休日の7時台）。足す便が拠点を通る時間帯（既定は対象の時間帯）・便数、ダイヤシフトで便を減らす時間帯・便数</dd>
+  <dt>しくみ</dt><dd><ol>
+    <li>時間空白診断と同じ方法で、対象の時間帯の空白を求める（5分刻みの平均）</li>
+    <li><span class="k">候補の路線を選ぶ</span>：その時間帯に一度でも空白になる場所の近くの停留所を、多く通る路線から順に並べる。便数の多い路線を選んでも空白は減らない（例：室蘭で最も便の多い路線は129停留所を通るが、空白の場所は1つも通らない）</li>
+    <li>候補路線ごとに2種類の案を作る。<span class="k">増便</span>：拠点を通る時刻が指定の時間帯に入るよう、上りと下りそれぞれ便を等間隔に足す（拠点を通らない系統は始発時刻で置く）。<span class="k">ダイヤシフト</span>：便の総数は変えずに、空いている時間帯から困っている時間帯へ便を移す</li>
+    <li>それぞれの案で、<span class="k">5〜22時台の到着時刻（5分刻み）すべて</span>について空白人口を計算し直し、今との差を時間で積み上げる（単位は人・時間。100人が1時間着けなかった状態を解消すると100人・時間）</li>
+    <li>費用の目安として<span class="k">運行キロ</span>（足した便の数×路線の長さ）の増え方を出し、「空白を1人・時間減らすのに何km走らせる必要があるか」を並べる</li>
+  </ol></dd>
+  <dt>大事な点</dt><dd>ダイヤシフトは、狙った時刻だけを見ると必ず良くなります。しかし便を抜いた時間帯は悪くなります。そのため<span class="k">1日全体で評価</span>しています。1日全体では悪化する案は、注意として表示します</dd>
+  <dt>出てくるもの</dt><dd>比較表と、それをもとにした自治体向けの政策文書の下書き。<span class="k">数値と推奨はすべて計算で決まり、生成AIは使いません</span>（希望すれば、自分のAPIキーで文章だけを整えられます）</dd>
+</dl></div>
+
+<h3>代替路線追加</h3>
+<div class="card"><dl>
+  <dt>わかること</dt><dd>ある路線を廃止して、代わりに新しい路線を走らせたら、行ける範囲がどう変わるか</dd>
+  <dt>設定</dt><dd>廃止する路線（なしも可）、新しい路線が通るバス停（2〜8か所、順番どおり）、運行間隔、平均速度</dd>
+  <dt>仮の時刻表</dt><dd>5時〜22時に、指定の間隔で、行き・帰りの両方向とも始発から新しい便を作る。停留所間の所要時間は、直線距離÷平均速度に、停車時間30秒を足したもの。あとは「② 廃止・減便」と同じように前後を比べる</dd>
+</dl></div>
+
+<h2>5. 一覧</h2>
+<table>
+  <tr><th>分析</th><th>計算の向き</th><th>計算の回数</th><th>人口の数え方</th><th>時刻表を変えるか</th></tr>
+  <tr><td>時間空白診断（3D）</td><td>逆方向</td><td>216回（5:00〜22:55着、5分刻み）</td><td>住まいから500m</td><td>変えない</td></tr>
+  <tr><td>時間帯別到達圏</td><td>順方向</td><td>216回（5:00〜22:55発、5分刻み）</td><td>—</td><td>変えない</td></tr>
+  <tr><td>到達圏のみ</td><td>順方向</td><td>1回</td><td>—</td><td>変えない</td></tr>
+  <tr><td>集客圏分析</td><td>逆方向</td><td>1回</td><td>停留所の周り300m</td><td>変えない</td></tr>
+  <tr><td>施設アクセス</td><td>順方向</td><td>1回</td><td>—</td><td>変えない</td></tr>
+  <tr><td>路線廃止・減便・バス停削除</td><td>順方向</td><td>2回（前・後）</td><td>停留所の周り300m</td><td>取り除く</td></tr>
+  <tr><td>改善策</td><td>逆方向</td><td>216回×（案の数＋1）</td><td>住まいから500m</td><td>便を足す・移す</td></tr>
+  <tr><td>代替路線追加</td><td>順方向</td><td>2回（前・後）</td><td>停留所の周り300m</td><td>路線を足す</td></tr>
+</table>
+
+<h2>6. 10-12版からの修正</h2>
+<p>10-12版で「まだ修正していない」と書いた2件を含め、次の点を直しました。</p>
+<table>
+  <tr><th>分析</th><th>以前の動き</th><th>修正後</th></tr>
+  <tr><td>すべての時間帯の値</td><td>毎時00分の1点だけで測っていた。数分の違いで結果が大きく変わり、00分がたまたま最悪・最良の時刻だと時間帯の値を取り違えた</td><td>5分刻みで計算し、時間帯の平均と幅を示す（1.6）</td></tr>
+  <tr><td>代替路線追加</td><td>帰り方向の便に行きと同じ時刻を割り当て、帰りは区間ごとに次の便を待つ計算になっていた（行き20分・帰り95分）</td><td>帰り方向も始発から時刻を積み上げて作る（行きと帰りの所要時間が同じになる）</td></tr>
+  <tr><td>施設アクセス</td><td>「高齢者（分速40m）」を選んでも徒歩時間は分速67mで、制限時間とも比べず、最寄りの1停留所しか見ていなかった</td><td>選んだ速さで歩く時間を含めて制限時間と比べ、500m以内の停留所から最も早く着けるものを使う</td></tr>
+  <tr><td>減便</td><td>方向を区別せず間引くため、2方向以上ある路線の約3分の1で片方向が全廃・全存続になっていた。「N本に1本」はNを選べず、一律削減は実際の削減率が指定とずれていた（平日50%指定で実際は46%）</td><td>方向・経路ごとに間引く。Nを選べる。実際の削減率は指定の±1ポイント程度で、画面に表示する</td></tr>
+  <tr><td>改善策</td><td>足す便を始発時刻で置いていたため、既定の「5〜9時に1便」が7:00発になり、7時台に拠点へ着く便にならなかった</td><td>拠点を通る時刻で置く。既定の時間帯は対象の時間帯に合わせる</td></tr>
+</table>
+
+<h2>7. 前提と限界</h2>
+<ul>
+  <li>家からバス停までは直線距離で歩くとみなす。実際の道のりを直線の1.3倍とすると、休日7:00着の空白は46.1%から53.8%に、静的空白は3,793人から7,613人に増える</li>
+  <li>乗り換えの余裕時間は見込まない（時刻表上で間に合えば乗り継げる）。遅延・混雑も考えない</li>
+  <li>鉄道・自家用車・タクシーは含めない。バスのみで行けるかを見る</li>
+  <li>出発地の停留所名に複数の乗り場（ポール）がある場合、到達圏系の分析は先頭の乗り場から計算する（空白診断の生活拠点はすべての乗り場を使う）</li>
+</ul>
+
+<footer>
+  クウハクスコープ（transit-accessibility ／ K-hskw）／ データ：道南バス GTFS-JP 2026年10月1日改正（ODPT基本ライセンス）、簡易100mメッシュ人口（令和2年国勢調査をもとに西澤明が作成、CC BY）、国土数値情報。数値は設定を変えると変わる。
+</footer>
+
+</body>
+</html>

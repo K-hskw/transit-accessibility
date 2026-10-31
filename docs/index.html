@@ -40,9 +40,10 @@ a{color:var(--accent)}
   <p class="lede">公共交通オープンデータチャレンジ2026 応募作品 ／ 北海道室蘭市・道南バス</p>
   <p class="hero">バス停からの距離ではなく、<b>時刻表</b>で交通空白を測ります。
     同じ地点でも時間帯・曜日で到達できるかが変わり、距離基準ではそれが見えません。
-    室蘭市では休日7時に市の <b>46.1%</b>（38,322人）が拠点へ着けません。</p>
+    室蘭市の休日、7時台に拠点へ着きたいとき、1時間前に家を出ても間に合わない人は平均で市の <b>27.9%</b>（23,183人）。
+    同じ7時台でも7:00着なら46.1%、7:35着なら11.9%と、数分の違いで大きく変わります。</p>
 
-  <img src="screenshot-3d.png" alt="時間空白診断の3Dマップ。柱の高さが拠点に着けない人口、色が1日のうち空白になる時間帯の数">
+  <img src="screenshot-3d.png" alt="時間空白診断の3Dマップ。柱の高さが拠点に着けない人口、色が1日のうち着けない時間の長さ">
 
   <a class="card" href="https://transit-accessibility-aik9qbme9ej2ue8wamnpvf.streamlit.app">
     <h2>アプリを開く<span class="tag">Streamlit</span></h2>
@@ -52,29 +53,34 @@ a{color:var(--accent)}
 
   <a class="card" href="kuhaku-scope-muroran.html">
     <h2>3Dマップを開く<span class="tag">インタラクティブ</span></h2>
-    <p>到着時刻とダイヤ（平日／土日祝）を切り替えると、拠点に着けない人口の柱が伸縮します。
-      灰色の土台が静的空白（徒歩圏にバス停がない）、暖色の柱が時間空白です。</p>
+    <p>到着の時間帯とダイヤ（平日／土日祝）を切り替えると、拠点に着けない人口の柱が伸縮します。
+      到着時刻を5分刻みにした平均と幅を表示します。灰色の土台が静的空白（徒歩圏にバス停がない）、暖色の柱が時間空白です。</p>
   </a>
 
-  <a class="card" href="クウハクスコープ_技術仕様書_20260928.pdf">
-    <h2>技術仕様書<span class="tag">PDF</span></h2>
-    <p>時刻依存ダイクストラ法の実装、空白人口の定義、処方モジュール、
-      発見した計算バグ、既知の限界までをまとめたもの。</p>
+  <a class="card" href="クウハクスコープ_技術仕様書_20261030.pdf">
+    <h2>技術仕様書（2026-10-30）<span class="tag">PDF</span></h2>
+    <p>時刻依存ダイクストラ法の実装、空白人口の定義と5分刻みの評価、処方モジュール、
+      発見・修正した計算バグ、既知の限界までをまとめたもの。</p>
+  </a>
+
+  <a class="card" href="クウハクスコープ_分析のしくみ_20261030.pdf">
+    <h2>分析のしくみ（2026-10-30）<span class="tag">PDF</span></h2>
+    <p>10種類の分析が、それぞれ何をどう計算しているかを、専門外の読み手向けに説明したもの。</p>
   </a>
 
   <a class="card" href="クウハクスコープ_進捗報告_20260921.pdf">
-    <h2>進捗報告<span class="tag">PDF</span></h2>
-    <p>修正した計算バグと、それによって更新された分析結果の対照表。</p>
+    <h2>進捗報告（2026-09-21）<span class="tag">PDF</span></h2>
+    <p>その時点で修正した計算バグと、それによって更新された分析結果の対照表（数値は毎時00分の1点で測った当時のもの）。</p>
   </a>
 
   <a class="card" href="https://github.com/K-hskw/transit-accessibility">
     <h2>ソースコード<span class="tag">GitHub</span></h2>
-    <p>Python / Streamlit。自作の時刻依存ダイクストラ法、テスト1,313件。</p>
+    <p>Python / Streamlit。自作の時刻依存ダイクストラ法、テスト1,558件。</p>
   </a>
 
   <footer>
-    データ出典：道南バス GTFS-JP（<a href="https://developer.odpt.org/terms/data_basic_license.html">ODPT基本ライセンス</a>）／
-    令和2年国勢調査 100mメッシュ人口／地球地図日本（国土地理院）。
+    データ出典：道南バス GTFS-JP 2026年10月1日改正（<a href="https://developer.odpt.org/terms/data_basic_license.html">ODPT基本ライセンス</a>）／
+    簡易100mメッシュ人口（令和2年国勢調査をもとに西澤明が作成、<a href="https://gtfs-gis.jp/teikyo/">gtfs-gis.jp</a>、CC BY）／地球地図日本（国土地理院）。
     数値は拠点・制限時間・徒歩条件を変えると変わります。
   </footer>
 </div>
