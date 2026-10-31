@@ -2,7 +2,14 @@
 
 診断（どこが時間空白か）に対して、処方は「何をすればその空白が埋まるか」を
 同じ指標で答える。効果は空白人口の削減数、費用は運行キロの増分（追加便数×
-路線長）で代理し、「空白を1人解消するのに必要な運行キロ」で施策を並べる。
+路線長）で代理し、「空白を1人・時間解消するのに必要な運行キロ」で施策を並べる。
+
+効果は到着時刻を5分刻みにして測る。毎時00分の1点だけで測ると、足した便が
+00分の直前に着くかどうかで効果が決まってしまい、1便足すと全日で8,847減るのに
+2便足すと0になるような逆転が起きていた。
+- 「H時台の空白」は H:00〜H:55着の平均（人）
+- 「全日の削減」は空白人口の減少を時間で積み上げた値（人・時間）。
+  100人が1時間着けなかった状態を解消すると100人・時間になる
 
 使い方:
     plans = [
@@ -15,6 +22,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 import pandas as pd
+
+from blank_area import DAY_HOURS, STEP_MIN
 
 
 @dataclass
@@ -78,16 +87,16 @@ def operating_km(engine, bus_edges):
     return total
 
 
-DEFAULT_HOURS = tuple(range(5, 23))
+DEFAULT_HOURS = DAY_HOURS
+
+# 同じ判定なら空白人口は完全に一致するが、念のため端数の誤差を変化と数えない
+_EPS = 1e-6
 
 
-def blank_by_hour(analyzer, dest_stop_ids, max_time_sec, hours=DEFAULT_HOURS):
-    """時間帯ごとの (空白人口, うち高齢者) を返す"""
-    out = {}
-    for h in hours:
-        s = analyzer.summarize(analyzer.diagnose(dest_stop_ids, h * 3600, max_time_sec))
-        out[h] = (s["blank_pop"], s["blank_elderly"])
-    return out
+def blank_by_hour(analyzer, dest_stop_ids, max_time_sec, hours=DEFAULT_HOURS,
+                  step_min=STEP_MIN):
+    """時間帯ごとの (空白人口の平均, うち高齢者の平均) を、hours と同じ並びの配列で返す"""
+    return analyzer.diagnose_day(dest_stop_ids, max_time_sec, hours, step_min).hourly_blank()
 
 
 def evaluate(engine, analyzer, dest_stop_ids, plan, arrival_hour, max_time_sec,
@@ -98,6 +107,7 @@ def evaluate(engine, analyzer, dest_stop_ids, plan, arrival_hour, max_time_sec,
     狙った時間帯は必ず良くなるが、便を抜いた時間帯は悪化する。単一時刻だけで
     測ると「費用ゼロで改善」に見えてしまい、実態を取り違える。
     """
+    hours = list(hours)
     if baseline_hours is None:
         baseline_hours = blank_by_hour(analyzer, dest_stop_ids, max_time_sec, hours)
     if baseline_km is None:
@@ -109,45 +119,50 @@ def evaluate(engine, analyzer, dest_stop_ids, plan, arrival_hour, max_time_sec,
         after_hours = blank_by_hour(analyzer, dest_stop_ids, max_time_sec, hours)
         km_after = operating_km(engine, engine.bus_edges)
 
-    worsened = [after_hours[h][0] - baseline_hours[h][0] for h in hours
-                if after_hours[h][0] > baseline_hours[h][0]]
-    reduced_target = baseline_hours[arrival_hour][0] - after_hours[arrival_hour][0]
-    reduced_day = sum(v[0] for v in baseline_hours.values()) - sum(v[0] for v in after_hours.values())
-    reduced_elderly = sum(v[1] for v in baseline_hours.values()) - sum(v[1] for v in after_hours.values())
+    (base_pop, base_eld), (after_pop, after_eld) = baseline_hours, after_hours
+    # 各時間帯の平均を1時間ぶんの値として足すと、5分刻みの積み上げ（人・時間）になる
+    diff = after_pop - base_pop
+    worse = diff[diff > _EPS]
+    hi = hours.index(arrival_hour)
+    reduced_day = round(float((base_pop - after_pop).sum()))
     extra_km = km_after - baseline_km
+    # 移す便が時間帯に1本も無いシフトなどは、ネットワークがそのまま返る。
+    # 0が並ぶ行だけだと「効果が無い施策」と読まれるので、変えられなかったことを書く
+    unchanged = bus_after is engine.bus_edges and walk_after is engine.walk_edges
     return {
-        "施策": plan.name,
-        f"{arrival_hour}時の空白": after_hours[arrival_hour][0],
-        f"{arrival_hour}時の削減": reduced_target,
+        "施策": plan.name + ("（対象の便が無く変更なし）" if unchanged else ""),
+        f"{arrival_hour}時台の空白": round(float(after_pop[hi])),
+        f"{arrival_hour}時台の削減": round(float(base_pop[hi] - after_pop[hi])),
         "全日の削減": reduced_day,
-        "全日うち高齢者": reduced_elderly,
-        "悪化した時間帯": len(worsened),
-        "最大悪化": max(worsened) if worsened else 0,
+        "全日うち高齢者": round(float((base_eld - after_eld).sum())),
+        "悪化した時間帯": int(len(worse)),
+        "最大悪化": round(float(worse.max())) if len(worse) else 0,
         "追加便数": added_trips,
         "運行キロ増": round(extra_km, 1),
         # 全日で悪化する施策に費用対効果を出すと誤解を招くので、純改善のときだけ出す
-        "1人あたり運行キロ": (round(extra_km / reduced_day, 3)
-                              if reduced_day > 0 and extra_km > 0 else None),
+        "1人・時間あたり運行キロ": (round(extra_km / reduced_day, 3)
+                                    if reduced_day > 0 and extra_km > 0 else None),
     }
 
 
 def compare(engine, analyzer, dest_stop_ids, plans, arrival_hour, max_time_sec,
             hours=DEFAULT_HOURS):
     """複数の施策を同じ条件で比較する表を返す（全日の削減が大きい順）"""
+    hours = list(hours)
     baseline_hours = blank_by_hour(analyzer, dest_stop_ids, max_time_sec, hours)
     baseline_km = operating_km(engine, engine.bus_edges)
 
     rows = [{
         "施策": "現状（何もしない）",
-        f"{arrival_hour}時の空白": baseline_hours[arrival_hour][0],
-        f"{arrival_hour}時の削減": 0,
+        f"{arrival_hour}時台の空白": round(float(baseline_hours[0][hours.index(arrival_hour)])),
+        f"{arrival_hour}時台の削減": 0,
         "全日の削減": 0,
         "全日うち高齢者": 0,
         "悪化した時間帯": 0,
         "最大悪化": 0,
         "追加便数": 0,
         "運行キロ増": 0.0,
-        "1人あたり運行キロ": None,
+        "1人・時間あたり運行キロ": None,
     }]
     for plan in plans:
         rows.append(evaluate(engine, analyzer, dest_stop_ids, plan, arrival_hour,

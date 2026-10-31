@@ -22,6 +22,7 @@ class TransitEngine:
         省略時はカレントディレクトリの既定エッジ（室蘭）を読む。アップロードされた
         GTFSは訪問者ごとの一時ディレクトリにエッジを作り、ここで指定する。
         """
+        self.gtfs_dir = gtfs_dir
         self.stops = pd.read_csv(f"{gtfs_dir}/stops.txt")
         self.routes = pd.read_csv(f"{gtfs_dir}/routes.txt")
         # service_id は文字列として読む。"01" のようなゼロ詰めのIDを pandas が
@@ -58,6 +59,27 @@ class TransitEngine:
         self._route_length_cache = {}
 
         self.set_day_type(day_type)
+
+    def feed_info(self):
+        """feed_info.txt の事業者名と有効期間（YYYY-MM-DD）。無ければ None
+
+        出典の表示と、有効期間切れの時刻表で分析していないかの確認に使う。
+        """
+        path = os.path.join(self.gtfs_dir, "feed_info.txt")
+        if not os.path.exists(path):
+            return None
+        try:
+            row = pd.read_csv(path, dtype=str).iloc[0]
+        except (pd.errors.EmptyDataError, IndexError):
+            return None
+
+        def ymd(v):
+            v = str(v) if isinstance(v, str) else ""
+            return f"{v[:4]}-{v[4:6]}-{v[6:8]}" if len(v) == 8 and v.isdigit() else None
+
+        publisher = row.get("feed_publisher_name")
+        return {"publisher": publisher if isinstance(publisher, str) else None,
+                "start": ymd(row.get("feed_start_date")), "end": ymd(row.get("feed_end_date"))}
 
     def clear_graph_cache(self):
         """bus_edges / walk_edges を差し替えたときにキャッシュを破棄する"""
@@ -438,59 +460,72 @@ class TransitEngine:
         walk_graph = self._build_walk_graph(walk_after)
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
 
-    def edges_after_frequency_reduction(self, reduce_mode, target_route_id=None, reduce_ratio=0.5):
-        """減便後の (bus_edges, walk_edges) を返す。徒歩エッジは変わらない。"""
-        if reduce_mode == "half":
-            target_trips = self.bus_edges[self.bus_edges["route_id"] == target_route_id]["trip_id"].unique()
-            keep_trips = target_trips[::2]
-            remove_trips = set(target_trips) - set(keep_trips)
-            edges_after = self.bus_edges[~self.bus_edges["trip_id"].isin(remove_trips)]
+    @staticmethod
+    def _thinning_order(n):
+        """時刻順に並んだ n 本の便を、間引く順に並べた添字を返す
 
-        elif reduce_mode == "interval":
-            keep_every = max(2, int(reduce_ratio))
-            target_trips = self.bus_edges[self.bus_edges["route_id"] == target_route_id]["trip_id"].unique()
-            trip_dep_times = {}
-            for tid in target_trips:
-                trip_edges = self.bus_edges[self.bus_edges["trip_id"] == tid]
-                if len(trip_edges) > 0:
-                    trip_dep_times[tid] = trip_edges["departure_sec"].min()
-            sorted_trips = sorted(trip_dep_times.keys(), key=lambda t: trip_dep_times[t])
-            keep_trips = set(sorted_trips[::keep_every])
-            remove_trips = set(sorted_trips) - keep_trips
-            edges_after = self.bus_edges[~self.bus_edges["trip_id"].isin(remove_trips)]
+        先頭から k 本を取ると、どの k でも時刻に偏りなく散らばり、k を増やしても
+        前に選んだ便は選ばれたまま残る（入れ子）。そのため減便率を上げたときに
+        一度削った便が復活することがなく、「減便率を上げれば空白は増えない方向に
+        しか動かない」が組み立てとして成り立つ。並べ方は添字+1を2進数で左右反転した
+        値（van der Corput 列）の小さい順で、k = n//2 ではちょうど2本目・4本目…が
+        選ばれる（1本おきに残す）。
+        """
+        def radical_inverse(x):
+            v, base = 0.0, 0.5
+            while x:
+                x, r = divmod(x, 2)
+                v += r * base
+                base /= 2
+            return v
+        return sorted(range(n), key=lambda i: (radical_inverse(i + 1), i))
+
+    def edges_after_frequency_reduction(self, reduce_mode, target_route_id=None, reduce_ratio=0.5,
+                                        keep_every=None):
+        """減便後の (bus_edges, walk_edges) を返す。徒歩エッジは変わらない。
+
+        便は停留所パターン（方向・経路）ごとに時刻順に並べて間引く。以前は路線の便を
+        trip_id 順や方向を混ぜた時刻順で間引いており、2パターン以上ある53路線中18路線で
+        片方向の便が全部残るか全部消えていた（「半分」なのに片方向だけ全廃になる）。
+            half     : 各パターンで1本おきに残す（1本目・3本目…）
+            interval : 各パターンで keep_every 本に1本残す（1本目・(N+1)本目…）
+            all      : 全路線の各パターンで、便数×reduce_ratio の前後の本数を削る。
+                       削る便は _thinning_order の順なので、率を上げると削る便が増えるだけ
+        """
+        remove_trips = set()
+        if reduce_mode in ("half", "interval"):
+            if reduce_mode == "half":
+                n_keep = 2
+            else:
+                # keep_every を渡さない古い呼び出しは reduce_ratio に N を入れていた
+                n_keep = max(2, int(keep_every if keep_every is not None else reduce_ratio))
+            for trips in self._trip_patterns(target_route_id).values():
+                remove_trips.update(tid for i, (_dep, tid, _g) in enumerate(trips) if i % n_keep)
 
         elif reduce_mode == "all":
-            remove_trips = set()
-            for route_id in self.bus_edges["route_id"].unique():
-                route_trips = self.bus_edges[self.bus_edges["route_id"] == route_id]["trip_id"].unique()
-                if len(route_trips) <= 1:
-                    continue
-                trip_dep_times = {}
-                for tid in route_trips:
-                    trip_edges = self.bus_edges[self.bus_edges["trip_id"] == tid]
-                    if len(trip_edges) > 0:
-                        trip_dep_times[tid] = trip_edges["departure_sec"].min()
-                sorted_trips = sorted(trip_dep_times.keys(), key=lambda t: trip_dep_times[t])
-                n_remove = max(1, int(len(sorted_trips) * reduce_ratio))
-                step = len(sorted_trips) / n_remove
-                remove_indices = set()
-                for i in range(n_remove):
-                    idx = int(i * step)
-                    if idx < len(sorted_trips):
-                        remove_indices.add(idx)
-                for idx in remove_indices:
-                    remove_trips.add(sorted_trips[idx])
-            edges_after = self.bus_edges[~self.bus_edges["trip_id"].isin(remove_trips)]
+            # パターンごとに削る本数は k = floor(便数×率 + φ)。φ はパターンごとに固定の
+            # 0〜1の値で、黄金比で散らす。四捨五入（φ=0.5）だと便数1〜3本のパターンが多いため
+            # 切り上げに偏り、50%指定で実際は61%削れていた。φ を散らすと切り上げと切り捨てが
+            # パターン間で相殺されて全体の削減率が指定に近づき、率を上げても k は減らない。
+            patterns = []
+            for route_id in sorted(self.bus_edges["route_id"].dropna().unique(), key=str):
+                pats = self._trip_patterns(route_id)
+                patterns.extend(pats[key] for key in sorted(pats, key=str))
+            for j, trips in enumerate(patterns):
+                phi = ((j + 1) * 0.6180339887498949) % 1.0
+                k = int(len(trips) * reduce_ratio + phi)
+                order = self._thinning_order(len(trips))
+                remove_trips.update(trips[i][1] for i in order[:k])
 
-        else:
-            edges_after = self.bus_edges
-
-        return edges_after, self.walk_edges
+        if not remove_trips:
+            return self.bus_edges, self.walk_edges
+        return self.bus_edges[~self.bus_edges["trip_id"].isin(remove_trips)], self.walk_edges
 
     def simulate_frequency_reduction(self, start_stop_id, start_time_sec, max_time_sec,
                                      reduce_mode, target_route_id=None, reduce_ratio=0.5,
-                                     track_path=False):
-        edges_after, _ = self.edges_after_frequency_reduction(reduce_mode, target_route_id, reduce_ratio)
+                                     track_path=False, keep_every=None):
+        edges_after, _ = self.edges_after_frequency_reduction(
+            reduce_mode, target_route_id, reduce_ratio, keep_every)
         bus_graph = self._build_bus_graph(edges_after)
         walk_graph = self._full_walk_graph()
         return self._dijkstra(bus_graph, walk_graph, start_stop_id, start_time_sec, max_time_sec, track_path)
@@ -526,52 +561,91 @@ class TransitEngine:
         out["trip_id"] = new_trip_id
         return out
 
-    def edges_after_frequency_increase(self, target_route_id, start_hour, end_hour, n_trips=1):
+    @staticmethod
+    def _via_offset(edges_of_trip, via_stops):
+        """便の始発から via_stops のどれかを最初に通るまでの秒数（通らなければ None）"""
+        if not via_stops:
+            return None
+        start = int(edges_of_trip["departure_sec"].min())
+        times = []
+        dep = edges_of_trip.loc[edges_of_trip["from_stop"].isin(via_stops), "departure_sec"]
+        arr = edges_of_trip.loc[edges_of_trip["to_stop"].isin(via_stops), "arrival_sec"]
+        if len(dep):
+            times.append(int(dep.min()))
+        if len(arr):
+            times.append(int(arr.min()))
+        return min(times) - start if times else None
+
+    def _anchored(self, trips, via_stops):
+        """パターンの便を (基準時刻, 始発時刻, trip_id, エッジ群) にする
+
+        基準時刻は拠点（via_stops）を通る時刻。拠点を通らないパターンや
+        via_stops を渡さない場合は始発時刻。
+        """
+        out = []
+        for dep, tid, g in trips:
+            off = self._via_offset(g, via_stops)
+            out.append((dep + (off or 0), dep, tid, g))
+        return out
+
+    def edges_after_frequency_increase(self, target_route_id, start_hour, end_hour, n_trips=1,
+                                       via_stops=None):
         """指定時間帯を増便した (bus_edges, walk_edges) を返す。
 
         停留所パターンごとに n_trips 便を時間帯内へ等間隔に挿入する。方向別に
         足すので、パターンが2方向あれば実際の追加便数は 2×n_trips になる。
         所要時間と停車パターンは、その時間帯に最も近い既存便をそのまま使う。
 
+        via_stops（拠点の停留所ID）を渡すと、足す便が拠点を通る時刻を時間帯内に
+        等間隔に置く（拠点を通らないパターンは始発時刻で置く）。始発時刻だけで置くと、
+        既定の「5〜9時に1便」が7:00発になり、7時台に拠点へ着く便にならなかった。
+
         既存便の隙間を埋める方式にはしていない。空白が深刻な時間帯ほど既存便が
         1本以下で隙間が定義できず、最も増便したい路線に限って増便できなくなるため。
         """
         lo, hi = start_hour * 3600, end_hour * 3600
+        via = set(via_stops or ())
         added, n = [], 0
         for trips in self._trip_patterns(target_route_id).values():
             if not trips:
                 continue
+            anchored = self._anchored(trips, via)
             # 時間帯内の便を雛形にする。無ければ時間帯に最も近い便で代用する
-            in_window = [t for t in trips if lo <= t[0] < hi]
-            template = in_window[0][2] if in_window else min(
-                trips, key=lambda t: min(abs(t[0] - lo), abs(t[0] - hi)))[2]
+            in_window = [a for a in anchored if lo <= a[0] < hi]
+            anc, dep, _tid, template = in_window[0] if in_window else min(
+                anchored, key=lambda a: min(abs(a[0] - lo), abs(a[0] - hi)))
             for i in range(n_trips):
                 n += 1
-                new_dep = lo + (hi - lo) * (i + 1) // (n_trips + 1)
-                added.append(self._shifted_trip(template, new_dep, f"ADD_{target_route_id}_{n}"))
+                target = lo + (hi - lo) * (i + 1) // (n_trips + 1)
+                added.append(self._shifted_trip(template, target - (anc - dep),
+                                                f"ADD_{target_route_id}_{n}"))
         if not added:
             return self.bus_edges, self.walk_edges
         return pd.concat([self.bus_edges] + added, ignore_index=True), self.walk_edges
 
-    def edges_after_timetable_shift(self, target_route_id, from_hours, to_hours, n_trips=1):
+    def edges_after_timetable_shift(self, target_route_id, from_hours, to_hours, n_trips=1,
+                                    via_stops=None):
         """便数を変えずに時間帯を移した (bus_edges, walk_edges) を返す（費用中立）。
 
         from_hours=(開始,終了) に発車する便を、パターンごとに最大 n_trips 本
         to_hours の時間帯へ移す。総便数・総走行距離は変わらないため、
         「増便せずに時間帯を組み替えるだけで空白を減らせるか」を検証できる。
         移す便は from_hours の遅い側から選ぶ（早朝側のサービスを残すため）。
+        via_stops を渡すと、時間帯の判定と移動先の時刻を「拠点を通る時刻」で行う。
         """
         lo_f, hi_f = from_hours[0] * 3600, from_hours[1] * 3600
         lo_t, hi_t = to_hours[0] * 3600, to_hours[1] * 3600
+        via = set(via_stops or ())
         removed_ids, added, n = set(), [], 0
         for trips in self._trip_patterns(target_route_id).values():
-            in_window = [t for t in trips if lo_f <= t[0] < hi_f]
+            in_window = [a for a in self._anchored(trips, via) if lo_f <= a[0] < hi_f]
             picked = in_window[-n_trips:] if n_trips > 0 else []
-            for i, (_dep, tid, g) in enumerate(picked):
+            for i, (anc, dep, tid, g) in enumerate(picked):
                 n += 1
-                new_dep = lo_t + (hi_t - lo_t) * (i + 1) // (len(picked) + 1)
+                target = lo_t + (hi_t - lo_t) * (i + 1) // (len(picked) + 1)
                 removed_ids.add(tid)
-                added.append(self._shifted_trip(g, new_dep, f"SHIFT_{target_route_id}_{n}"))
+                added.append(self._shifted_trip(g, target - (anc - dep),
+                                                f"SHIFT_{target_route_id}_{n}"))
         if not added:
             return self.bus_edges, self.walk_edges
         kept = self.bus_edges[~self.bus_edges["trip_id"].isin(removed_ids)]
@@ -644,51 +718,37 @@ class TransitEngine:
             a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
             return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
-        # 新路線のエッジを生成
+        # 新路線のエッジを生成。行きは指定順、帰りは逆順に、それぞれ始発から時刻を積み上げる。
+        # 以前は帰りの便に行きと同じ区間時刻を割り当てていたため、帰りは時刻をさかのぼる
+        # 並びになって2区間以上続けて乗れず、区間ごとに次の便を待つ計算になっていた
+        # （5停留所・30分間隔で、行き20分に対し帰り95分）。
         new_edges = []
-        if len(new_route_stops) >= 2:
-            # 5時〜22時の間、interval_min間隔で運行
+        stops = [s for s in new_route_stops if s in self.stop_coords.index]
+        if len(stops) >= 2:
+            # 区間ごとの所要秒数（直線距離÷平均速度）
+            seg_sec = []
+            for s1, s2 in zip(stops, stops[1:]):
+                a, b = self.stop_coords.loc[s1], self.stop_coords.loc[s2]
+                dist_m = hav(a["stop_lat"], a["stop_lon"], b["stop_lat"], b["stop_lon"])
+                seg_sec.append(int(dist_m / (speed_kmh * 1000 / 3600)))
+
+            # 5時〜22時の間、interval_min間隔で両方向とも始発を出す
             interval_sec = interval_min * 60
             for trip_num, dep_base_sec in enumerate(range(5*3600, 22*3600, interval_sec)):
-                trip_id = f"NEW_TRIP_{trip_num}"
-                cumulative_time = 0
-                for i in range(len(new_route_stops) - 1):
-                    s1 = new_route_stops[i]
-                    s2 = new_route_stops[i+1]
-                    if s1 not in self.stop_coords.index or s2 not in self.stop_coords.index:
-                        continue
-                    lat1 = self.stop_coords.loc[s1, "stop_lat"]
-                    lon1 = self.stop_coords.loc[s1, "stop_lon"]
-                    lat2 = self.stop_coords.loc[s2, "stop_lat"]
-                    lon2 = self.stop_coords.loc[s2, "stop_lon"]
-                    dist_m = hav(lat1, lon1, lat2, lon2)
-                    travel_sec = int(dist_m / (speed_kmh * 1000 / 3600))
-
-                    dep_sec = dep_base_sec + cumulative_time
-                    arr_sec = dep_sec + travel_sec
-                    cumulative_time += travel_sec + 30  # 停車30秒
-
-                    new_edges.append({
-                        "from_stop": s1,
-                        "to_stop": s2,
-                        "departure_sec": dep_sec,
-                        "arrival_sec": arr_sec,
-                        "travel_time": travel_sec,
-                        "trip_id": trip_id,
-                        "route_id": "NEW_ROUTE",
-                        "type": "bus"
-                    })
-                    # 反対方向も追加
-                    new_edges.append({
-                        "from_stop": s2,
-                        "to_stop": s1,
-                        "departure_sec": dep_sec,
-                        "arrival_sec": arr_sec,
-                        "travel_time": travel_sec,
-                        "trip_id": trip_id + "_R",
-                        "route_id": "NEW_ROUTE",
-                        "type": "bus"
-                    })
+                for suffix, seq, secs in (("", stops, seg_sec), ("_R", stops[::-1], seg_sec[::-1])):
+                    t = dep_base_sec
+                    for (s1, s2), travel_sec in zip(zip(seq, seq[1:]), secs):
+                        new_edges.append({
+                            "from_stop": s1,
+                            "to_stop": s2,
+                            "departure_sec": t,
+                            "arrival_sec": t + travel_sec,
+                            "travel_time": travel_sec,
+                            "trip_id": f"NEW_TRIP_{trip_num}{suffix}",
+                            "route_id": "NEW_ROUTE",
+                            "type": "bus"
+                        })
+                        t += travel_sec + 30  # 停車30秒
 
         if new_edges:
             new_edges_df = pd.DataFrame(new_edges)

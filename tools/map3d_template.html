@@ -121,17 +121,17 @@ th{color:var(--muted);font-weight:500;font-size:11px}
 
     <div>
       <div class="row">
-        <div class="eyebrow">拠点への到着時刻</div>
-        <div class="hour"><span id="hour-v">9</span><small>時までに着く</small></div>
+        <div class="eyebrow">拠点に着く時間帯</div>
+        <div class="hour"><span id="hour-v">9</span><small>時台に着く</small></div>
       </div>
-      <input type="range" id="hour" min="5" max="22" step="1" value="9" aria-label="到着時刻（時）">
+      <input type="range" id="hour" min="5" max="22" step="1" value="9" aria-label="到着の時間帯（時台）">
       <div class="ticks"><span>5</span><span>8</span><span>11</span><span>14</span><span>17</span><span>20</span><span>22</span></div>
     </div>
 
     <div class="tiles" id="tiles"></div>
 
     <div class="chart">
-      <div class="eyebrow">時間帯別の空白人口</div>
+      <div class="eyebrow">時間帯別の空白人口（棒＝平均、線＝到着時刻による幅）</div>
       <svg id="bars" viewBox="0 0 304 120" role="img" aria-label="時間帯別の空白人口"></svg>
       <div class="cap" id="bars-cap"></div>
     </div>
@@ -152,10 +152,10 @@ th{color:var(--muted);font-weight:500;font-size:11px}
       <figcaption class="t">北海道における室蘭市の位置<br>輪郭: 地球地図日本（国土地理院）</figcaption>
     </figure>
     <div class="legend">
-      <div class="t">柱の高さ ＝ その時刻までに拠点へ着けない人口</div>
+      <div class="t">柱の高さ ＝ その時間帯に拠点へ着けない人口（到着時刻5分刻みの平均）</div>
       <div class="ramp" id="ramp"></div>
-      <div class="ramp-l"><span>1–3</span><span>4–7</span><span>8–11</span><span>12–15</span><span>16–18 時間帯</span></div>
-      <div class="t">暖色 ＝ 時間空白。濃いほど1日18時間帯のうち多くの時間帯で着けない</div>
+      <div class="ramp-l"><span>〜3</span><span>〜7</span><span>〜11</span><span>〜15</span><span>〜18 時間</span></div>
+      <div class="t">暖色 ＝ 時間空白。濃いほど1日（5〜23時）のうち着けない時間が長い</div>
       <div class="keys">
         <span><i class="sw" style="background:var(--static)"></i>灰色の土台 ＝ 静的空白（徒歩圏にバス停がない）</span>
         <span><i class="sw" style="background:var(--land)"></i>室蘭市の市域（100mメッシュ人口の範囲）</span>
@@ -190,11 +190,12 @@ let dayKey = "wd", hour = 9;
 
 const $ = s => document.querySelector(s);
 const fmt = n => Number(n).toLocaleString("ja-JP");
+const clock = s => `${Math.floor(s/3600)}:${String(Math.floor((s%3600)/60)).padStart(2,"0")}`;
 const tok = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const rgb = (hex, a=255) => { const h=hex.replace("#",""); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16),a]; };
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-$("#sub").textContent = `${M.dest}へ${M.max_time_min}分以内に着けるか ／ 徒歩${M.walk_m}m・${M.walk_speed}m/分 ／ ${M.mesh_m}mメッシュ`;
+$("#sub").textContent = `${M.dest}に間に合うか（到着時刻の${M.max_time_min}分前以降に出発） ／ 徒歩${M.walk_m}m・${M.walk_speed}m/分 ／ ${M.mesh_m}mメッシュ ／ 到着時刻${M.step_min}分刻み`;
 
 const cells = D.cells.map(c => ({
   ...c,
@@ -264,10 +265,10 @@ function initDeck(){
       controller:true,
       layers: layers(),
       getTooltip: ({object}) => object && object.blank>0 && {
-        html:`<div class="dk-tip">${DAYS[dayKey]}・${hour}時着（メッシュ人口 ${fmt(object.pop)}）<br>`
+        html:`<div class="dk-tip">${DAYS[dayKey]}・${hour}時台の平均（セル人口 ${fmt(object.pop)}）<br>`
             +`空白人口 <b>${fmt(object.blank)}</b>人 ＝ 時間空白 <b>${fmt(object.blank-object.static_pop)}</b> ＋ 静的空白 <b>${fmt(object.static_pop)}</b><br>`
             +`うち高齢者 <b>${fmt(object.eld)}</b>人<br>`
-            +(object.blank-object.static_pop>0 ? `時間空白になる時間帯 <b>${object.sev}</b>/18` : `徒歩圏にバス停がない（ダイヤによらず空白）`)
+            +(object.blank-object.static_pop>0 ? `1日のうち着けない時間 最長 約<b>${object.sev}</b>時間（セル内の地点）` : `徒歩圏にバス停がない（ダイヤによらず空白）`)
             +`</div>`,
         style:{background:tok("--panel"), color:tok("--ink"), border:`1px solid ${tok("--line")}`, borderRadius:"6px", padding:"8px 10px", boxShadow:tok("--shadow"), fontSize:"12px"}
       }
@@ -286,15 +287,16 @@ function render(){
   const diff = s.blank_pop - o.blank_pop;
   $("#hour-v").textContent = hour;
   $("#tiles").innerHTML = `
-    <div class="tile lead"><div class="k">空白人口（${day}・${hour}時着まで）</div>
+    <div class="tile lead"><div class="k">空白人口（${day}・${hour}時台の平均）</div>
       <div class="v">${fmt(s.blank_pop)}<small>人 ／ 市の ${pct(s.blank_pop)}%</small></div>
-      <div class="d">${other}の同時刻 ${fmt(o.blank_pop)}人（${diff>=0?"+":""}${fmt(diff)}）</div></div>
+      <div class="d">到着時刻により ${fmt(s.blank_pop_min)}人（${clock(s.time_min)}着）〜 ${fmt(s.blank_pop_max)}人（${clock(s.time_max)}着）</div>
+      <div class="d">${other}の同時間帯 ${fmt(o.blank_pop)}人（${diff>=0?"+":""}${fmt(diff)}）</div></div>
     <div class="tile"><div class="k">うち高齢者（65歳以上）</div><div class="v">${fmt(s.blank_elderly)}<small>人</small></div></div>
     <div class="tile"><div class="k">総人口</div><div class="v">${fmt(s.total_pop)}<small>人</small></div></div>
     <div class="tile"><div class="k">静的空白 ― 徒歩圏にバス停がない</div><div class="v">${fmt(s.static_blank_pop)}<small>人</small></div><div class="d">ダイヤによらず一定</div></div>
     <div class="tile"><div class="k">時間空白 ― バス停はあるが間に合わない</div><div class="v">${fmt(timeBlank)}<small>人</small></div><div class="d">本作が測る対象</div></div>`;
   drawBars();
-  $("#note").innerHTML = `<b>読み方</b>　同じ場所でも到着時刻を動かすと柱が伸び縮みします。赤が濃い柱ほど、1日のうち多くの時間帯で拠点に着けません。土曜と日祝は時刻表が同一のため「土日祝」にまとめています。数値は transit_engine の時刻依存ダイクストラ法による計算結果で、AIが生成した図形ではありません。`;
+  $("#note").innerHTML = `<b>読み方</b>　「着ける」とは、到着時刻の${M.max_time_min}分前以降に家を出て、到着時刻までに拠点に着けることです。到着時刻を5分刻みで動かして判定し、時間帯の値はその平均です。同じ時間帯でも数分の違いで便に間に合うかが変わるため、棒の線で幅を示しています。赤が濃い柱ほど、1日のうち拠点に着けない時間が長い地域です。土曜と日祝は、室蘭市内では時刻表が同じため（違いは伊達市内・留寿都方面の土曜だけ走る5便のみ）「土日祝」にまとめています。数値は transit_engine の時刻依存ダイクストラ法による計算結果で、AIが生成した図形ではありません。`;
   if(dk) dk.setProps({layers: layers()});
 }
 
@@ -313,23 +315,28 @@ function drawBars(){
     g += `<text x="${L-4}" y="${yy+3.5}" text-anchor="end" font-size="9" fill="${faint}" font-family="IBM Plex Sans,system-ui">${f===0?"0":f===1?"総人口":(v/1000|0)+"k"}</text>`;
   });
   hours.forEach((h,i)=>{
-    const v = D.summary[day][h].blank_pop, x = L + i*bw + gap/2, yy = y(v), hh = H-B-yy;
+    const sm = D.summary[day][h];
+    const v = sm.blank_pop, x = L + i*bw + gap/2, yy = y(v), hh = H-B-yy;
+    const cx = (x+(bw-gap)/2).toFixed(1);
     const sel = h===hour;
-    g += `<rect x="${x.toFixed(1)}" y="${yy.toFixed(1)}" width="${(bw-gap).toFixed(1)}" height="${hh.toFixed(1)}" rx="2" fill="${sel?on:bar}" data-h="${h}" style="cursor:pointer"><title>${h}時着 ${fmt(v)}人</title></rect>`;
-    if(sel) g += `<text x="${(x+(bw-gap)/2).toFixed(1)}" y="${(yy-4).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="600" fill="${ink}" font-family="IBM Plex Sans,system-ui">${fmt(v)}</text>`;
-    if(h%3===2||h===5) g += `<text x="${(x+(bw-gap)/2).toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="9" fill="${muted}" font-family="IBM Plex Sans,system-ui">${h}</text>`;
+    g += `<rect x="${x.toFixed(1)}" y="${yy.toFixed(1)}" width="${(bw-gap).toFixed(1)}" height="${hh.toFixed(1)}" rx="2" fill="${sel?on:bar}" data-h="${h}" style="cursor:pointer"><title>${h}時台 平均 ${fmt(v)}人（${fmt(sm.blank_pop_min)}〜${fmt(sm.blank_pop_max)}人）</title></rect>`;
+    // 到着時刻（5分刻み）による幅。平均だけだと時間帯の中の揺れが見えない
+    g += `<line x1="${cx}" x2="${cx}" y1="${y(sm.blank_pop_min).toFixed(1)}" y2="${y(sm.blank_pop_max).toFixed(1)}" stroke="${ink}" stroke-width="1" opacity=".55" pointer-events="none"/>`;
+    if(sel) g += `<text x="${cx}" y="${(y(sm.blank_pop_max)-4).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="600" fill="${ink}" font-family="IBM Plex Sans,system-ui">${fmt(v)}</text>`;
+    if(h%3===2||h===5) g += `<text x="${cx}" y="${H-8}" text-anchor="middle" font-size="9" fill="${muted}" font-family="IBM Plex Sans,system-ui">${h}</text>`;
   });
   $("#bars").innerHTML = g;
   const worst = hours.reduce((a,h)=>D.summary[day][h].blank_pop>D.summary[day][a].blank_pop?h:a, hours[0]);
   const best  = hours.reduce((a,h)=>D.summary[day][h].blank_pop<D.summary[day][a].blank_pop?h:a, hours[0]);
-  $("#bars-cap").textContent = `${day}: 最小 ${best}時着 ${fmt(D.summary[day][best].blank_pop)}人 ／ 最大 ${worst}時着 ${fmt(D.summary[day][worst].blank_pop)}人。棒をクリックで時刻を変更`;
+  $("#bars-cap").textContent = `${day}: 最小 ${best}時台 平均${fmt(D.summary[day][best].blank_pop)}人 ／ 最大 ${worst}時台 平均${fmt(D.summary[day][worst].blank_pop)}人。棒をクリックで時間帯を変更`;
 }
 $("#bars").addEventListener("click", e=>{ const h=e.target.getAttribute("data-h"); if(h){ hour=+h; $("#hour").value=h; render(); }});
 
 function buildTable(){
-  let t = `<table><thead><tr><th>到着時刻</th><th>平日 空白人口</th><th>平日 高齢者</th><th>土日祝 空白人口</th><th>土日祝 高齢者</th></tr></thead><tbody>`;
+  let t = `<table><thead><tr><th>到着</th><th>平日 空白人口<br><small>平均（幅）</small></th><th>平日 高齢者</th><th>土日祝 空白人口<br><small>平均（幅）</small></th><th>土日祝 高齢者</th></tr></thead><tbody>`;
+  const cell = s => `${fmt(s.blank_pop)}<br><small>${fmt(s.blank_pop_min)}〜${fmt(s.blank_pop_max)}</small>`;
   M.hours.forEach(h=>{ const a=D.summary["平日"][h], b=D.summary["日祝"][h];
-    t += `<tr><td>${h}時</td><td>${fmt(a.blank_pop)}</td><td>${fmt(a.blank_elderly)}</td><td>${fmt(b.blank_pop)}</td><td>${fmt(b.blank_elderly)}</td></tr>`; });
+    t += `<tr><td>${h}時台</td><td>${cell(a)}</td><td>${fmt(a.blank_elderly)}</td><td>${cell(b)}</td><td>${fmt(b.blank_elderly)}</td></tr>`; });
   t += `</tbody></table>`;
   $("#table").innerHTML = t;
 }

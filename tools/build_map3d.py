@@ -24,7 +24,7 @@ sys.path.insert(0, ROOT)
 import numpy as np
 from transit_engine import TransitEngine
 from population import PopulationData
-from blank_area import BlankAreaAnalyzer, aggregate_to_500m
+from blank_area import BlankAreaAnalyzer, aggregate_to_500m, STEP_MIN
 
 TEMPLATE = os.path.join(HERE, "map3d_template.html")
 HOKKAIDO = os.path.join(HERE, "hokkaido.json")
@@ -34,7 +34,7 @@ OUTPUT = os.path.join(ROOT, "docs", "kuhaku-scope-muroran.html")
 DEST_NAME = "東室蘭駅東口"
 POP_CSV = "100m_mesh_pop2020_01205室蘭市.csv"
 HOURS = list(range(5, 23))
-DAYS = ["平日", "日祝"]   # 土曜は日祝と時刻表が同一なので代表として日祝を使う
+DAYS = ["平日", "日祝"]   # 土曜は室蘭市内では日祝と時刻表が同じなので代表として日祝を使う（違いは伊達市内・留寿都方面の5便）
 MAX_TIME = 3600           # 制限時間60分
 WALK_M = 500
 WALK_SPEED = 67
@@ -63,23 +63,20 @@ def compute():
     for day in DAYS:
         eng.set_day_type(day)
         values[day], elderly[day], summary[day] = {}, {}, {}
-        blank_hours = np.zeros(an.n_mesh, dtype=int)
-        per_hour = {}
+        # 到着時刻を5分刻みにして診断し、時間帯の値はその平均にする（アプリと同じ）。
+        # 毎時00分の1点だけだと、休日7:00着 46.1% / 7:15着 28.2% のように数分で大きく揺れる。
+        dd = an.diagnose_day(dest, MAX_TIME, HOURS)
+        # 静的空白メッシュは終日空白になるのが当たり前なので、深刻度（1日のうち
+        # 着けない時間）は静的でないメッシュだけで数える。混ぜると駅前の丘陵地が
+        # 「最も深刻な時間空白」に見えてしまう。
+        blank_hours = np.where(an.static_blank, 0.0, dd.blank_hours())
         for h in HOURS:
-            df = an.diagnose(dest, h * 3600, MAX_TIME)
-            per_hour[h] = df
-            blank_hours += (~df["reachable"]).to_numpy().astype(int)
-            s = an.summarize(df)
-            summary[day][h] = {
-                "blank_pop": s["blank_pop"], "blank_elderly": s["blank_elderly"],
-                "static_blank_pop": s["static_blank_pop"], "total_pop": s["total_pop"],
-            }
-        for h in HOURS:
-            df = per_hour[h].copy()
-            # 静的空白メッシュは終日空白になるのが当たり前なので、深刻度（何時間帯
-            # 空白か）は静的でないメッシュだけで数える。混ぜると駅前の丘陵地が
-            # 「最も深刻な時間空白」に見えてしまう。
-            df["blank_hours"] = np.where(df["static_blank"], 0, blank_hours)
+            s = dd.hour_summary(h)
+            summary[day][h] = {k: s[k] for k in (
+                "blank_pop", "blank_elderly", "static_blank_pop", "total_pop",
+                "blank_pop_min", "blank_pop_max", "time_min", "time_max")}
+            df = dd.hour_mesh(h)
+            df["blank_hours"] = blank_hours
             g = aggregate_to_500m(df).sort_values("cell").reset_index(drop=True)
             if cells_index is None:
                 cells_index = g["cell"].tolist()
@@ -101,7 +98,7 @@ def compute():
             values[day][h] = [int(round(v)) for v in g["blank_pop"]]
             elderly[day][h] = [int(round(v)) for v in g["blank_elderly"]]
             if h == HOURS[0]:
-                sev[day] = [int(v) for v in g["blank_hours"]]
+                sev[day] = [round(float(v), 1) for v in g["blank_hours"]]
 
     eng.set_day_type("平日")
 
@@ -125,6 +122,7 @@ def compute():
         "meta": {
             "dest": DEST_NAME, "max_time_min": MAX_TIME // 60, "walk_m": WALK_M,
             "walk_speed": WALK_SPEED, "mesh_m": 500, "hours": HOURS, "days": DAYS,
+            "step_min": STEP_MIN,
             "half_lat": 2.5 / 1200, "half_lon": 2.5 / 800,
             # 100mメッシュ1辺の半分（緯度1/1200度・経度1/800度が100mメッシュの刻み）
             "land_half_lat": 0.5 / 1200, "land_half_lon": 0.5 / 800,
@@ -158,7 +156,9 @@ def main():
     s = data["summary"]
     print(f"出力: {os.path.relpath(OUTPUT, ROOT)}  ({len(html) / 1024:.0f} KB)")
     print(f"セル数 {len(data['cells'])} / バス停 {len(data['stops'])} / データ {len(payload) / 1024:.0f} KB")
-    print(f"平日 9時 空白人口 {s['平日'][9]['blank_pop']:,} / 日祝 7時 {s['日祝'][7]['blank_pop']:,}")
+    for day, h in (("平日", 9), ("日祝", 7)):
+        v = s[day][h]
+        print(f"{day} {h}時台 空白人口 平均 {v['blank_pop']:,}（{v['blank_pop_min']:,}〜{v['blank_pop_max']:,}）")
 
 
 if __name__ == "__main__":

@@ -183,37 +183,58 @@ class FacilityData:
         return results
 
     def calc_facility_access(self, isochrone_result, start_time_sec, facilities, stop_coords,
-                              walk_speed=67, max_walk_distance=500):
-        """各施設へのアクセス可能性を計算"""
-        nearest = self.find_nearest_stops(facilities, stop_coords, max_walk_distance)
+                              walk_speed=67, max_walk_distance=500, max_time_sec=None):
+        """各施設へのアクセス可能性を計算
+
+        徒歩圏（max_walk_distance）内のすべての停留所について「バスで着く時刻＋そこから
+        施設まで歩く時間」を求め、最も早く着ける停留所を使う。max_time_sec を渡すと、
+        歩く時間を含めた合計が制限時間を超える施設は「アクセス不可」にする。
+        以前は最寄り1停留所だけを見て、歩く時間を常に分速67mで数え、制限時間とも
+        比べていなかったため、「高齢者（分速40m）」を選んでも結果が変わらなかった。
+        徒歩圏に停留所が1つも無い施設は結果に含めない（従来どおり）。
+        """
+        if len(facilities) == 0 or len(stop_coords) == 0:
+            return []
+        d = haversine_matrix(
+            facilities["latitude"].to_numpy(), facilities["longitude"].to_numpy(),
+            stop_coords["stop_lat"].to_numpy(), stop_coords["stop_lon"].to_numpy()
+        )
+        stop_ids = stop_coords.index.to_numpy()
+        names = stop_coords["stop_name"].to_numpy()
         access_results = []
-        for fac in nearest:
-            stop_id = fac["nearest_stop"]
-            walk_sec = fac["walk_time_sec"]
-
-            if stop_id in isochrone_result:
-                bus_arrival = isochrone_result[stop_id]
-                total_time = (bus_arrival - start_time_sec) + walk_sec
-                total_min = total_time / 60
-                accessible = True
-            else:
+        for i, (_, fac) in enumerate(facilities.iterrows()):
+            near = np.nonzero(d[i] <= max_walk_distance)[0]
+            if len(near) == 0:
+                continue
+            best = None          # (合計秒, 停留所の位置, 徒歩秒)
+            for j in near:
+                arrival = isochrone_result.get(stop_ids[j])
+                if arrival is None:
+                    continue
+                walk_sec = d[i, j] / walk_speed * 60
+                total = (arrival - start_time_sec) + walk_sec
+                if best is None or total < best[0]:
+                    best = (total, j, walk_sec)
+            accessible = best is not None and (max_time_sec is None or best[0] <= max_time_sec)
+            if best is None:
+                # バスでどの停留所にも着けない。表示用に最寄りの停留所を示す
+                j = near[np.argmin(d[i, near])]
+                walk_sec = d[i, j] / walk_speed * 60
                 total_min = None
-                accessible = False
-
-            stop_name = ""
-            if stop_id in stop_coords.index:
-                stop_name = stop_coords.loc[stop_id, "stop_name"]
+            else:
+                _total, j, walk_sec = best
+                total_min = round(best[0] / 60, 1)
 
             access_results.append({
-                "facility_name": fac["facility_name"],
-                "facility_type": fac["facility_type"],
-                "facility_lat": fac["facility_lat"],
-                "facility_lon": fac["facility_lon"],
-                "nearest_stop": stop_name,
-                "walk_distance_m": fac["distance_m"],
+                "facility_name": fac["name"],
+                "facility_type": fac["type"],
+                "facility_lat": fac["latitude"],
+                "facility_lon": fac["longitude"],
+                "nearest_stop": names[j],
+                "walk_distance_m": round(float(d[i, j])),
                 "walk_time_min": round(walk_sec / 60, 1),
-                "total_time_min": round(total_min, 1) if total_min else None,
-                "accessible": accessible
+                "total_time_min": total_min,
+                "accessible": bool(accessible),
             })
 
         return access_results

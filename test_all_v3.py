@@ -63,6 +63,34 @@ for ftype in facility_data.facility_types:
 
     print(f"  {ftype}: {accessible}/{len(access)}件アクセス可能")
 
+# ===== 1b. 歩行速度と制限時間 =====
+# 以前は施設まで歩く時間を常に分速67mで数え、制限時間とも比べていなかったため、
+# 「高齢者（分速40m）」を選んでも結果が変わらなかった。
+print("\n--- 1b. 歩行速度と制限時間 ---")
+n_slower = 0
+for ftype in facility_data.facility_types:
+    facilities = facility_data.get_facilities_by_type(ftype)
+    gen = facility_data.calc_facility_access(result_before, start_time, facilities,
+                                             engine.stop_coords, walk_speed=67,
+                                             max_time_sec=max_time)
+    eld = facility_data.calc_facility_access(result_before, start_time, facilities,
+                                             engine.stop_coords, walk_speed=40,
+                                             max_time_sec=max_time)
+    test(f"施設({ftype}) 速度で対象施設は変わらない",
+         [a["facility_name"] for a in gen] == [a["facility_name"] for a in eld])
+    test(f"施設({ftype}) 高齢者のアクセス可能数 <= 一般",
+         sum(a["accessible"] for a in eld) <= sum(a["accessible"] for a in gen))
+    test(f"施設({ftype}) アクセス可能なら合計時間は制限時間以内",
+         all(a["total_time_min"] <= max_time / 60 + 1e-9 for a in gen + eld if a["accessible"]))
+    for g, e in zip(gen, eld):
+        if g["total_time_min"] is not None and e["total_time_min"] is not None:
+            test(f"施設({g['facility_name']}) 高齢者の所要時間 >= 一般",
+                 e["total_time_min"] >= g["total_time_min"],
+                 f"一般 {g['total_time_min']} / 高齢者 {e['total_time_min']}")
+            n_slower += e["total_time_min"] > g["total_time_min"]
+test("高齢者の速度で所要時間が長くなる施設がある（速度が計算に効いている）", n_slower > 0,
+     f"{n_slower}件")
+
 # ===== 2. 単一路線廃止 + 施設アクセス連動 =====
 print("\n--- 2. 路線廃止 + 施設アクセス連動チェック ---")
 

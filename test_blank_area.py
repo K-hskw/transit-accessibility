@@ -183,6 +183,87 @@ for _lvl, _code in [("500m", lambda s: s.str[:8] + "1"), ("1km", lambda s: s.str
          len(_cells) == _df["meshcode"].nunique(),
          f"{len(_cells)} vs {_df['meshcode'].nunique()}")
 
+# ===== 8. 到着時刻の5分刻み =====
+# 毎時00分の1点だけで測ると、数分の違いで便に間に合うかが変わり結果が大きく
+# 揺れる（休日7:00着 46.1% / 7:15着 28.2%）。時間帯の値は5分刻みの平均にした。
+print("\n--- 8. 5分刻みの診断 ---")
+from blank_area import arrival_times, DayDiagnosis
+
+times = arrival_times()
+test("5〜22時台を5分刻みで216通り", len(times) == 216 and times[0] == 5 * 3600
+     and times[-1] == 22 * 3600 + 55 * 60, f"{len(times)} {times[0]} {times[-1]}")
+bad_step = False
+try:
+    arrival_times(step_min=7)
+except ValueError:
+    bad_step = True
+test("60の約数でない刻みはエラー", bad_step)
+
+engine.set_day_type("日祝")
+day = analyzer.diagnose_day(dest, max_time)
+test("診断結果の形が 時刻×メッシュ", day.blank.shape == (216, analyzer.n_mesh), str(day.blank.shape))
+
+# 1時刻ずつの診断（従来の diagnose）と行が一致すること
+for t in (5 * 3600, 7 * 3600, 7 * 3600 + 35 * 60, 22 * 3600 + 55 * 60):
+    one = analyzer.diagnose(dest, t, max_time)
+    i = int(np.nonzero(day.times == t)[0][0])
+    test(f"{t // 3600}:{(t % 3600) // 60:02d}着の行が単独の診断と一致",
+         np.array_equal(day.blank[i], ~one["reachable"].to_numpy()))
+
+s7 = day.hour_summary(7)
+singles = [analyzer.summarize(analyzer.diagnose(dest, int(t), max_time))["blank_pop"]
+           for t in day.hour_times(7)]
+test("時間帯の値は12通りの平均", abs(s7["blank_pop"] - np.mean(singles)) <= 0.5,
+     f"{s7['blank_pop']} vs {np.mean(singles):.2f}")
+test("最小 <= 平均 <= 最大",
+     s7["blank_pop_min"] <= s7["blank_pop"] <= s7["blank_pop_max"],
+     f"{s7['blank_pop_min']} / {s7['blank_pop']} / {s7['blank_pop_max']}")
+test("00分ちょうどの値も幅の中にある（従来の測り方は特殊な1点）",
+     s7["blank_pop_min"] <= singles[0] <= s7["blank_pop_max"])
+test("同じ時間帯の中でも到着時刻で空白人口が変わる（時間空白を捉えている）",
+     s7["blank_pop_max"] > s7["blank_pop_min"],
+     f"{s7['blank_pop_min']}〜{s7['blank_pop_max']}")
+
+hm = day.hour_mesh(7)
+test("メッシュの空白割合は0〜1", hm["blank_share"].between(0, 1).all())
+test("静的空白メッシュは常に空白（割合1）", (hm.loc[hm["static_blank"], "blank_share"] == 1).all())
+# singles は1時刻ごとに整数へ丸めた値なので、丸める前の値どうしで比べる
+exact7 = float(day.blank_pop_t[(day.times >= 7 * 3600) & (day.times < 8 * 3600)].mean())
+test("メッシュの空白人口を足すと時間帯の平均に一致",
+     abs(hm["blank_pop"].sum() - exact7) < 1e-6,
+     f"{hm['blank_pop'].sum():.4f} vs {exact7:.4f}")
+cells7 = aggregate_to_500m(hm)
+test("500mに集約しても時間帯の平均が保存される",
+     abs(cells7["blank_pop"].sum() - hm["blank_pop"].sum()) < 1e-6)
+
+bh = day.blank_hours()
+test("1日のうち着けない時間は0〜18時間", (bh >= 0).all() and (bh <= 18).all(), f"最大{bh.max()}")
+test("静的空白メッシュは18時間すべて空白", (bh[analyzer.static_blank] == 18).all())
+test("時間帯別の表は18行", len(day.hourly()) == 18)
+hp, he = day.hourly_blank()
+test("時間帯ごとの平均（丸め前）が要約と一致",
+     all(round(float(hp[i])) == day.hour_summary(h)["blank_pop"] for i, h in enumerate(day.hours)))
+
+no_hour = False
+try:
+    analyzer.diagnose_day(dest, max_time, hours=[9]).hour_summary(7)
+except ValueError:
+    no_hour = True
+test("計算していない時間帯を求めるとエラー", no_hour)
+engine.set_day_type("平日")
+
+# ===== 9. 人口と時刻表の地域のずれ =====
+# 別の都市のGTFSに室蘭の人口が残ったまま診断すると、全メッシュが静的空白になり、
+# エラーも出ずに空白人口100%と表示されていた。地域が重なっているかを確かめられること。
+print("\n--- 9. 人口と時刻表の地域のずれ ---")
+test("室蘭の人口と時刻表は重なっている（歩ける範囲にバス停がある人口が8割超）",
+     analyzer.served_share() > 0.8, f"{analyzer.served_share():.3f}")
+moved = engine.session_copy()
+moved.stop_coords = engine.stop_coords.assign(stop_lat=engine.stop_coords["stop_lat"] + 1.5)
+far = BlankAreaAnalyzer(moved, pop_data, max_walk_m=500, walk_speed_m_min=67)
+test("停留所が別の地域にあると、重なりは0になる（アプリはこれで警告する）",
+     far.served_share() == 0.0, f"{far.served_share():.3f}")
+
 print("\n" + "=" * 70)
 print(f"テスト結果: {tests_passed}/{tests_run} パス")
 if errors:

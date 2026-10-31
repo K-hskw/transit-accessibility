@@ -40,8 +40,8 @@ SYSTEM_PROMPT = """あなたは自治体の交通政策担当者に向けた文�
 def region_from_population_path(path, default="対象地域"):
     """メッシュ人口CSVのファイル名から自治体名を取り出す
 
-    e-Stat由来の "100m_mesh_pop2020_01205室蘭市.csv" のように、団体コードの
-    直後に自治体名が入る命名を想定する。合わなければ default を返すだけで、
+    簡易100mメッシュ人口（gtfs-gis.jp）の "100m_mesh_pop2020_01205室蘭市.csv" のように、
+    団体コードの直後に自治体名が入る命名を想定する。合わなければ default を返すだけで、
     文書生成そのものは止めない。
     """
     if not path:
@@ -73,10 +73,45 @@ class ReportContext:
     sources: list = field(default_factory=list)
 
 
+# 以前は人口を「令和2年国勢調査 100mメッシュ別人口（総務省統計局・e-Stat）」と書いていたが、
+# e-Stat に100mメッシュの人口は無い。使っているのは国勢調査の250mメッシュ人口を建物面積で
+# 按分した推計値（gtfs-gis.jp、CC BY）で、CC BY は作成者の表示を求める。
+KANI_100M_SOURCE = ("人口: 簡易100mメッシュ人口（令和2年国勢調査の250mメッシュ人口を建物面積で"
+                    "100mメッシュに按分した推計値。作成: 西澤明（東京大学空間情報科学研究センター）、"
+                    "https://gtfs-gis.jp/teikyo/ 、CC BY）")
+
 DEFAULT_SOURCES = [
-    "バス時刻表: GTFS-JP（公共交通オープンデータセンター／事業者公開フィード）",
-    "人口: 令和2年国勢調査 100mメッシュ別人口（総務省統計局・e-Stat）",
+    "バス時刻表: GTFS-JP",
+    KANI_100M_SOURCE,
 ]
+
+
+def sources_for(feed=None, population_path=None):
+    """実際に使ったデータから出典の行を作る
+
+    feed            : TransitEngine.feed_info() の戻り値（事業者名・有効期間。無ければ None）
+    population_path : 人口CSVのパス。簡易100mメッシュ人口の命名なら作成者を表示する
+    """
+    out = []
+    if feed and feed.get("publisher"):
+        line = f"バス時刻表: GTFS-JP（{feed['publisher']}"
+        if feed.get("start") and feed.get("end"):
+            line += f"、有効期間 {feed['start']}〜{feed['end']}"
+        out.append(line + "）")
+    else:
+        out.append("バス時刻表: GTFS-JP")
+    name = os.path.basename(str(population_path or ""))
+    if not name or name.startswith("100m_mesh_pop2020_"):
+        out.append(KANI_100M_SOURCE)
+    else:
+        out.append(f"人口: 利用者が読み込んだメッシュ人口（{name}）")
+    return out
+
+
+def _clock(sec):
+    """秒を 7:05 の形にする"""
+    sec = int(sec)
+    return f"{sec // 3600}:{(sec % 3600) // 60:02d}"
 
 
 # ===== 表の描画 =====
@@ -133,9 +168,9 @@ def recommend(table, arrival_hour):
     out["tied"] = len(tied)
     out["best"] = tied.sort_values(["運行キロ増", "追加便数"]).iloc[0]
 
-    eff = positive[positive["1人あたり運行キロ"].notna()]
+    eff = positive[positive["1人・時間あたり運行キロ"].notna()]
     if not eff.empty:
-        cheapest = eff.loc[eff["1人あたり運行キロ"].idxmin()]
+        cheapest = eff.loc[eff["1人・時間あたり運行キロ"].idxmin()]
         if cheapest["施策"] != out["best"]["施策"]:
             out["cheapest"] = cheapest
 
@@ -160,7 +195,7 @@ def build_document(ctx):
     dest = "、".join(ctx.dest_names) if ctx.dest_names else "（未設定）"
     h = ctx.arrival_hour
     rec = recommend(ctx.table, h)
-    hours_label = f"{min(ctx.hours)}〜{max(ctx.hours)}時"
+    hours_label = f"{min(ctx.hours)}時台〜{max(ctx.hours)}時台"
 
     p = [f"# {ctx.region}　公共交通の時間空白と改善施策の比較", ""]
     p.append("本資料は、バス時刻表（GTFS-JP）と国勢調査メッシュ人口から、"
@@ -172,15 +207,27 @@ def build_document(ctx):
     p.append("")
     p.append(f"- ダイヤ: {ctx.day_type}")
     p.append(f"- 生活拠点: {dest}")
-    p.append(f"- 判定: {h}時までに拠点へ到着でき、所要時間が{ctx.max_time_min}分以内であること")
+    p.append(f"- 判定: 到着時刻の{ctx.max_time_min}分前以降に自宅を出て、到着時刻までに拠点へ着けるか"
+             f"（早く着いて待つ時間も{ctx.max_time_min}分に含みます）")
+    p.append(f"- 時間帯の値: 到着時刻を{h}:00〜{h}:55の5分刻み（12通り）にして判定した人数の平均")
     p.append(f"- 乗車条件: 居住メッシュから徒歩{ctx.walk_m}m以内の停留所を利用（徒歩分速{ctx.walk_speed}m）")
     p.append("")
 
     # --- 1. 要旨 ---
     p.append("## 1. 要旨")
     p.append("")
-    p.append(f"- {h}時までに{dest}へ到達できない人口は **{blank:,}人**で、"
+    p.append(f"- {h}時台に{dest}へ到達できない人口は平均 **{blank:,}人**で、"
              f"対象人口{total:,}人の{pct:.1f}%にあたります。うち65歳以上は{s['blank_elderly']:,}人です。")
+    if "blank_pop_min" in s and "blank_pop_max" in s:
+        # 同じ時間帯でも数分の違いで便に間に合うかが変わる。平均だけ書くと
+        # この揺れ（時間空白そのもの）が読み手から消えるので、幅も書く。
+        span = f"{s['blank_pop_min']:,}人"
+        if "time_min" in s:
+            span += f"（{_clock(s['time_min'])}着）"
+        span += f"から{s['blank_pop_max']:,}人"
+        if "time_max" in s:
+            span += f"（{_clock(s['time_max'])}着）"
+        p.append(f"- 同じ{h}時台でも、到着時刻によって{span}まで変わります。")
     p.append(f"- このうち{static:,}人は徒歩圏に停留所が無い地域（静的空白）で、"
              f"ダイヤの見直しでは解消できません。残る **{time_blank:,}人**は"
              "停留所はあるが便が無い、または間に合わない「時間空白」であり、"
@@ -188,7 +235,7 @@ def build_document(ctx):
     if rec["best"] is not None:
         b = rec["best"]
         p.append(f"- 比較した{rec['n_plans']}件の施策のうち、{hours_label}の延べ空白人口を"
-                 f"最も減らすのは「{b['施策']}」で、**{int(b['全日の削減']):,}人・時間帯**の削減となります。")
+                 f"最も減らすのは「{b['施策']}」で、**{int(b['全日の削減']):,}人・時間**の削減となります。")
     else:
         p.append(f"- 比較した{rec['n_plans']}件の施策には、{hours_label}を通算して"
                  "空白人口を減らすものがありませんでした。対象路線または対象時間帯の"
@@ -200,10 +247,10 @@ def build_document(ctx):
     p.append("")
     diag_df = pd.DataFrame([
         {"区分": "対象人口", "人数": total, "説明": "メッシュ人口の合計"},
-        {"区分": f"{h}時に到達できない人口", "人数": blank,
-         "説明": f"うち65歳以上 {s['blank_elderly']:,}人（{pct:.1f}%）"},
+        {"区分": f"{h}時台に到達できない人口（平均）", "人数": blank,
+         "説明": f"対象人口の{pct:.1f}%。うち65歳以上 {s['blank_elderly']:,}人"},
         {"区分": "└ 静的空白", "人数": static, "説明": f"徒歩{ctx.walk_m}m以内に停留所が無い"},
-        {"区分": "└ 時間空白", "人数": time_blank, "説明": "停留所はあるが、その時刻に間に合わない"},
+        {"区分": "└ 時間空白", "人数": time_blank, "説明": "停留所はあるが、その時間帯に間に合わない"},
     ])
     p.append(markdown_table(diag_df))
     p.append("")
@@ -227,12 +274,14 @@ def build_document(ctx):
     p.append("")
     p.append(markdown_table(ctx.table))
     p.append("")
-    p.append(f"- 「全日の削減」は{hours_label}の各時刻について空白人口を算出し、"
-             "その延べ人数の減少を合計したものです。")
-    p.append("- ダイヤシフトは便を移すだけなので、狙った時刻は必ず改善します。"
-             "一方で便を抜いた時間帯は悪化するため、単一時刻ではなく全時間帯で評価しています。")
+    p.append(f"- 「{h}時台の空白」「{h}時台の削減」は、到着時刻を{h}:00〜{h}:55の5分刻みにして求めた平均（人）です。")
+    p.append(f"- 「全日の削減」は{hours_label}の空白人口の減少を時間で積み上げた値（人・時間）です。"
+             "100人が1時間着けなかった状態を解消すると100人・時間になります。")
+    p.append("- ダイヤシフトは便を移すだけなので、狙った時間帯は必ず改善します。"
+             "一方で便を抜いた時間帯は悪化するため、狙った時間帯だけでなく全時間帯で評価しています。")
     p.append("- 「運行キロ増」は費用の代理値で、追加便数×路線長（停留所間の直線距離の和）です。"
-             "実際のキロ当たり単価を掛ければ概算費用になります。")
+             "実際のキロ当たり単価を掛ければ概算費用になります。"
+             "「1人・時間あたり運行キロ」は運行キロ増を全日の削減で割った値です。")
     p.append("")
 
     # --- 4. 推奨 ---
@@ -247,23 +296,24 @@ def build_document(ctx):
         b = rec["best"]
         p.append(f"**「{b['施策']}」を推奨します。**")
         p.append("")
-        if int(b[f"{h}時の削減"]) > 0:
-            p.append(f"- {h}時の空白人口は{int(b[f'{h}時の削減']):,}人減り、"
-                     f"{int(b[f'{h}時の空白']):,}人になります。")
+        if int(b[f"{h}時台の削減"]) > 0:
+            p.append(f"- {h}時台の空白人口は平均{int(b[f'{h}時台の削減']):,}人減り、"
+                     f"{int(b[f'{h}時台の空白']):,}人になります。")
         else:
-            # 狙った時刻が変わらない施策を「改善」と書くと誤解を招く。
+            # 狙った時間帯が変わらない施策を「改善」と書くと誤解を招く。
             # 効果が他の時間帯に出ていることをそのまま書く。
-            p.append(f"- {h}時の空白人口は{int(b[f'{h}時の空白']):,}人で変わりません。"
+            p.append(f"- {h}時台の空白人口は平均{int(b[f'{h}時台の空白']):,}人で変わりません。"
                      f"効果は他の時間帯に現れます。"
-                     f"{h}時そのものを改善したい場合は、この時刻に拠点へ到達できる"
+                     f"{h}時台そのものを改善したい場合は、この時間帯に拠点へ到達できる"
                      "便の追加を別途検討する必要があります。")
-        p.append(f"- {hours_label}の延べ空白人口は{int(b['全日の削減']):,}人・時間帯減り、"
-                 f"うち65歳以上は{int(b['全日うち高齢者']):,}人・時間帯です。")
+        p.append(f"- {hours_label}の延べ空白人口は{int(b['全日の削減']):,}人・時間減り、"
+                 f"うち65歳以上は{int(b['全日うち高齢者']):,}人・時間です。")
         p.append(f"- 必要な増便は{int(b['追加便数']):,}便、運行キロの増分は{b['運行キロ増']:,.1f}km（1日あたり）です。")
-        if b["1人あたり運行キロ"] is not None and not pd.isna(b["1人あたり運行キロ"]):
-            p.append(f"- 空白人口を1人・時間帯減らすのに必要な運行キロは{b['1人あたり運行キロ']:.3f}kmです。")
+        per = b["1人・時間あたり運行キロ"]
+        if per is not None and not pd.isna(per):
+            p.append(f"- 空白人口を1人・時間減らすのに必要な運行キロは{per:.3f}kmです。")
         if int(b["悪化した時間帯"]) > 0:
-            p.append(f"- ただし{int(b['悪化した時間帯'])}の時間帯で空白人口が増え、"
+            p.append(f"- ただし{int(b['悪化した時間帯'])}の時間帯で空白人口（平均）が増え、"
                      f"最大の悪化は{int(b['最大悪化']):,}人です。導入時はこの時間帯の確認が必要です。")
         p.append("")
         if rec["tied"] > 1:
@@ -273,7 +323,7 @@ def build_document(ctx):
         if rec["cheapest"] is not None:
             c = rec["cheapest"]
             p.append(f"費用を抑える場合は「{c['施策']}」が効率的です。"
-                     f"削減は{int(c['全日の削減']):,}人・時間帯と小さくなりますが、"
+                     f"削減は{int(c['全日の削減']):,}人・時間と小さくなりますが、"
                      f"運行キロの増分は{c['運行キロ増']:,.1f}kmにとどまります。")
             p.append("")
         if rec["free"] is not None:
@@ -287,12 +337,12 @@ def build_document(ctx):
         p.append("**注意を要する施策**")
         p.append("")
         for _, r in rec["harmful"].iterrows():
-            if int(r[f"{h}時の削減"]) > 0:
-                head = (f"- 「{r['施策']}」は{h}時こそ{int(r[f'{h}時の削減']):,}人改善しますが、")
+            if int(r[f"{h}時台の削減"]) > 0:
+                head = (f"- 「{r['施策']}」は{h}時台こそ平均{int(r[f'{h}時台の削減']):,}人改善しますが、")
             else:
-                head = f"- 「{r['施策']}」は{h}時の空白を減らさないうえ、"
+                head = f"- 「{r['施策']}」は{h}時台の空白を減らさないうえ、"
             p.append(head
-                     + f"{hours_label}を通算すると空白人口が{abs(int(r['全日の削減'])):,}人・時間帯増えます。"
+                     + f"{hours_label}を通算すると延べ空白人口が{abs(int(r['全日の削減'])):,}人・時間増えます。"
                      "採用は推奨しません。")
         p.append("")
 
@@ -302,6 +352,8 @@ def build_document(ctx):
     p.append("- 到達可能性は時刻依存の最短経路探索で判定しています。停留所間の所要時間は"
              "時刻表の値をそのまま用い、乗り換えは時刻の前後関係で判定します。"
              "徒歩どうしの連続移動は乗り換えとして認めていません。")
+    p.append("- 到着時刻は5分刻みで評価し、時間帯の値はその平均としています。"
+             "同じ時間帯でも、到着時刻が数分違うだけで便に間に合うかが変わり、結果は大きく変わります。")
     p.append("- 道路の混雑や遅延は考慮していません。時刻表どおりに運行された場合の値です。")
     p.append("- 人口はメッシュ中心に集約して扱っています。メッシュ内の分布は考慮していません。")
     p.append("- 鉄道・自家用車・自転車・タクシーは含めていません。バスのみで到達できるかを見ています。")

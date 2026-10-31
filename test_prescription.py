@@ -80,6 +80,45 @@ if len(sparse):
          b2["trip_id"].nunique() > base_trips,
          f"{srid} 便数 {sparse.iloc[0]['便数']}")
 
+# 拠点を通る時刻で置く（via_stops）。始発時刻で置くと、既定の「5〜9時に1便」が
+# 7:00発になり、7時台に拠点へ着く便にならなかった。
+hub = set(dest)
+
+
+def hub_time(g):
+    """便が拠点を最初に通る時刻（通らなければ None）"""
+    t = list(g.loc[g["to_stop"].isin(hub), "arrival_sec"]) + \
+        list(g.loc[g["from_stop"].isin(hub), "departure_sec"])
+    return min(t) if t else None
+
+
+via_routes = [r for r in cand["route_id"]
+              if any(hub_time(t[2]) is not None for trips in engine._trip_patterns(r).values()
+                     for t in trips)]
+if via_routes:
+    vrid = via_routes[0]
+    bus_v, _ = engine.edges_after_frequency_increase(vrid, 7, 8, 2, via_stops=dest)
+    added_v = bus_v[bus_v["trip_id"].astype(str).str.startswith("ADD_")]
+    ok, n_via = True, 0
+    for tid, g in added_v.groupby("trip_id"):
+        ht = hub_time(g)
+        if ht is not None:
+            n_via += 1
+            ok &= 7 * 3600 <= ht < 8 * 3600
+        else:
+            ok &= 7 * 3600 <= g["departure_sec"].min() < 8 * 3600
+    test("拠点を通る便は、拠点を通る時刻が指定時間帯（7時台）に入る",
+         ok and n_via > 0, f"{vrid} 拠点を通る追加便 {n_via}")
+    bus_vs, _ = engine.edges_after_timetable_shift(vrid, (10, 15), (7, 8), 1, via_stops=dest)
+    test("拠点基準のシフトでも総便数は変わらない",
+         bus_vs["trip_id"].nunique() == base_trips)
+    moved_v = bus_vs[bus_vs["trip_id"].astype(str).str.startswith("SHIFT_")]
+    test("拠点基準のシフトで移した便は、拠点を通る時刻が移動先に入る",
+         all(7 * 3600 <= (hub_time(g) if hub_time(g) is not None else g["departure_sec"].min()) < 8 * 3600
+             for _, g in moved_v.groupby("trip_id")))
+else:
+    print("  （候補路線に拠点を通る路線が無いため、拠点基準の配置は検証できない）")
+
 # ===== 3. ダイヤシフト（費用中立） =====
 print("\n--- 3. ダイヤシフト ---")
 shift_rid = cand[cand["便数"] >= 6].iloc[0]["route_id"]
@@ -112,17 +151,36 @@ test("費用中立の施策は運行キロ増がゼロ",
      table[table["施策"] == "シフト"].iloc[0]["運行キロ増"] == 0.0)
 test("増便は運行キロが増える",
      table[table["施策"] == "増便"].iloc[0]["運行キロ増"] > 0)
-print(table[["施策", "7時の削減", "全日の削減", "悪化した時間帯", "追加便数", "運行キロ増"]].to_string(index=False))
+print(table[["施策", "7時台の削減", "全日の削減", "悪化した時間帯", "追加便数", "運行キロ増"]].to_string(index=False))
+test("列名が時間帯（7時台）になっている",
+     "7時台の空白" in table.columns and "7時台の削減" in table.columns, str(list(table.columns)))
 
 # ダイヤシフトは便を抜いた時間帯が悪化する。単一時刻だけ見ると見落とすので、
 # 全日評価が悪化を捕まえられているかを確かめる
 sh_row = table[table["施策"] == "シフト"].iloc[0]
 test("シフトの悪化時間帯を検出できている（狙った時刻が改善なら必ず悪化側がある）",
-     sh_row["7時の削減"] <= 0 or sh_row["悪化した時間帯"] > 0,
-     f"7時削減 {sh_row['7時の削減']} / 悪化 {sh_row['悪化した時間帯']}")
-test("全日の削減は狙った時刻の削減以下（他時間帯の悪化を含むため）",
-     sh_row["全日の削減"] <= sh_row["7時の削減"] or sh_row["悪化した時間帯"] == 0,
-     f"全日 {sh_row['全日の削減']} / 7時 {sh_row['7時の削減']}")
+     sh_row["7時台の削減"] <= 0 or sh_row["悪化した時間帯"] > 0,
+     f"7時台削減 {sh_row['7時台の削減']} / 悪化 {sh_row['悪化した時間帯']}")
+
+# 全日の削減 ＝ 時間帯ごとの平均の差の合計（人・時間）であることを、比較表とは
+# 別に計算し直して確かめる
+from prescription import blank_by_hour
+base_pop, _ = blank_by_hour(analyzer, dest, LIM)
+with engine.scenario(*engine.edges_after_timetable_shift(shift_rid, (10, 15), (5, 9), 2)):
+    after_pop, _ = blank_by_hour(analyzer, dest, LIM)
+test("全日の削減は時間帯ごとの平均の差の合計",
+     sh_row["全日の削減"] == round(float((base_pop - after_pop).sum())),
+     f"{sh_row['全日の削減']} vs {(base_pop - after_pop).sum():.2f}")
+test("7時台の削減は7時台の平均の差",
+     sh_row["7時台の削減"] == round(float(base_pop[2] - after_pop[2])),
+     f"{sh_row['7時台の削減']} vs {base_pop[2] - after_pop[2]:.2f}")
+
+# 何も変えない施策は、端数の誤差も含めて「変化なし」と判定されること
+noop = compare(engine, analyzer, dest, [Plan("無変更", lambda e: (e.bus_edges, e.walk_edges))],
+               arrival_hour=7, max_time_sec=LIM).iloc[1]
+test("何も変えない施策は削減0・悪化0",
+     noop["全日の削減"] == 0 and noop["7時台の削減"] == 0 and noop["悪化した時間帯"] == 0,
+     f"全日 {noop['全日の削減']} / 7時台 {noop['7時台の削減']} / 悪化 {noop['悪化した時間帯']}")
 
 # ===== 5. 評価しても状態が壊れないこと =====
 print("\n--- 5. 副作用が無いこと ---")

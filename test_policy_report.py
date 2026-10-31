@@ -33,7 +33,7 @@ print("=" * 70)
 
 # ===== 1. 自治体名の取り出し =====
 print("\n--- 1. 自治体名 ---")
-test("e-Stat形式のファイル名から市名を取れる",
+test("簡易100mメッシュ人口のファイル名から市名を取れる",
      pr.region_from_population_path("100m_mesh_pop2020_01205室蘭市.csv") == "室蘭市",
      pr.region_from_population_path("100m_mesh_pop2020_01205室蘭市.csv"))
 test("フルパスでも取れる",
@@ -65,18 +65,18 @@ test("数値を減らすのは検出対象外（削除は照合しない）",
 # ===== 3. 推奨の選び方（合成データ） =====
 print("\n--- 3. 推奨の選び方 ---")
 synth = pd.DataFrame([
-    {"施策": "現状（何もしない）", "7時の空白": 1000, "7時の削減": 0, "全日の削減": 0,
+    {"施策": "現状（何もしない）", "7時台の空白": 1000, "7時台の削減": 0, "全日の削減": 0,
      "全日うち高齢者": 0, "悪化した時間帯": 0, "最大悪化": 0, "追加便数": 0,
-     "運行キロ増": 0.0, "1人あたり運行キロ": None},
-    {"施策": "増便A", "7時の空白": 600, "7時の削減": 400, "全日の削減": 3000,
+     "運行キロ増": 0.0, "1人・時間あたり運行キロ": None},
+    {"施策": "増便A", "7時台の空白": 600, "7時台の削減": 400, "全日の削減": 3000,
      "全日うち高齢者": 900, "悪化した時間帯": 0, "最大悪化": 0, "追加便数": 12,
-     "運行キロ増": 120.0, "1人あたり運行キロ": 0.04},
-    {"施策": "増便B", "7時の空白": 800, "7時の削減": 200, "全日の削減": 1000,
+     "運行キロ増": 120.0, "1人・時間あたり運行キロ": 0.04},
+    {"施策": "増便B", "7時台の空白": 800, "7時台の削減": 200, "全日の削減": 1000,
      "全日うち高齢者": 300, "悪化した時間帯": 0, "最大悪化": 0, "追加便数": 3,
-     "運行キロ増": 20.0, "1人あたり運行キロ": 0.02},
-    {"施策": "シフトC", "7時の空白": 700, "7時の削減": 300, "全日の削減": -500,
+     "運行キロ増": 20.0, "1人・時間あたり運行キロ": 0.02},
+    {"施策": "シフトC", "7時台の空白": 700, "7時台の削減": 300, "全日の削減": -500,
      "全日うち高齢者": -100, "悪化した時間帯": 5, "最大悪化": 400, "追加便数": 0,
-     "運行キロ増": 0.0, "1人あたり運行キロ": None},
+     "運行キロ増": 0.0, "1人・時間あたり運行キロ": None},
 ])
 rec = pr.recommend(synth, 7)
 test("全日の削減が最大の施策を推奨する", rec["best"]["施策"] == "増便A", str(rec["best"]["施策"]))
@@ -117,8 +117,8 @@ test("同点があることを文書に書く", "同じ削減効果となる施�
 
 # 狙った時刻が改善しない施策を「改善」と書かない
 flat = synth[synth["施策"].isin(["現状（何もしない）", "増便A"])].copy()
-flat.loc[flat["施策"] == "増便A", "7時の削減"] = 0
-flat.loc[flat["施策"] == "増便A", "7時の空白"] = 1000
+flat.loc[flat["施策"] == "増便A", "7時台の削減"] = 0
+flat.loc[flat["施策"] == "増便A", "7時台の空白"] = 1000
 flat_doc = pr.build_document(pr.ReportContext(
     region="X市", day_type="平日", dest_names=["A"], arrival_hour=7, max_time_min=60,
     walk_m=500, walk_speed=67,
@@ -143,8 +143,10 @@ test("人口データが読み込み元のパスを覚えている",
      getattr(pop_data, "source_path", None) == "100m_mesh_pop2020_01205室蘭市.csv",
      str(getattr(pop_data, "source_path", None)))
 
-diag = analyzer.diagnose(dest, HOUR * 3600, LIM)
-summary = analyzer.summarize(diag)
+# アプリと同じく、対象の時間帯を5分刻みで診断した平均を使う
+hour_diag = analyzer.diagnose_day(dest, LIM, hours=[HOUR])
+diag = hour_diag.hour_mesh(HOUR)
+summary = hour_diag.hour_summary(HOUR)
 candidates = rank_routes_by_blank_coverage(engine, analyzer, diag)
 picked = list(candidates.head(2)["route_id"])
 plans = []
@@ -178,7 +180,33 @@ test("静的空白と時間空白を分けて書く",
      and f"{summary['blank_pop'] - summary['static_blank_pop']:,}人" in doc)
 test("条件（ダイヤ・拠点・徒歩）が明記される",
      "日祝" in doc and "東室蘭駅東口" in doc and "徒歩500m" in doc)
+test("時間帯の中の幅（最小・最大）が書かれる",
+     f"{summary['blank_pop_min']:,}人" in doc and f"{summary['blank_pop_max']:,}人" in doc,
+     f"{summary['blank_pop_min']:,} / {summary['blank_pop_max']:,}")
+test("判定の定義が実装どおり（制限時間前以降に出発し、到着時刻までに着く）",
+     "60分前以降に自宅を出て" in doc and "5分刻み" in doc)
+test("全日の単位は人・時間（旧来の『人・時間帯』を使わない）",
+     "人・時間帯" not in doc and "1時間着けなかった" in doc)
 test("出典が書かれている", "GTFS-JP" in doc and "国勢調査" in doc)
+# 以前は人口の出典を「100mメッシュ別人口（総務省統計局・e-Stat）」と誤って書いていた。
+# 実際は国勢調査を按分した推計値（gtfs-gis.jp、CC BY）で、作成者の表示が必要
+test("人口の出典を e-Stat の統計と書かない", "e-Stat" not in doc)
+feed = engine.feed_info()
+test("GTFSの feed_info から事業者名と有効期間を読める",
+     feed is not None and bool(feed["publisher"]) and feed["start"] <= feed["end"], str(feed))
+srcs = pr.sources_for(feed, pop_data.source_path)
+test("出典に事業者名と有効期間が入る",
+     feed["publisher"] in srcs[0] and feed["start"] in srcs[0] and feed["end"] in srcs[0], srcs[0])
+test("簡易100mメッシュ人口は作成者とライセンスを表示する",
+     "西澤明" in srcs[1] and "CC BY" in srcs[1] and "按分" in srcs[1], srcs[1])
+test("利用者が読み込んだ人口は、ファイル名を出典にする（推計値の作成者を名乗らない）",
+     "my_pop.csv" in pr.sources_for(None, "/tmp/my_pop.csv")[1]
+     and "西澤明" not in pr.sources_for(None, "/tmp/my_pop.csv")[1])
+doc_src = pr.build_document(pr.ReportContext(
+    region="室蘭市", day_type="日祝", dest_names=["東室蘭駅東口"], arrival_hour=HOUR,
+    max_time_min=60, walk_m=500, walk_speed=67, summary=summary, table=table,
+    candidates=candidates, sources=srcs))
+test("出典を渡すと文書に載る", all(s in doc_src for s in srcs))
 test("nan が漏れていない", "nan" not in doc.lower().replace("financial", ""),
      [l for l in doc.split("\n") if "nan" in l.lower()][:2])
 test("None が漏れていない", "None" not in doc,

@@ -2,6 +2,11 @@
 
 「空白人口」を、起点1バス停からの到達圏ではなく
 『各メッシュから生活拠点に、指定時刻までに公共交通で着けるか』で定義する。
+正確には「到着時刻 T の制限時間前（T − max_time_sec）以降に家を出て、T までに
+拠点へ着ける経路があるか」。早く着いて拠点で待つ時間も制限時間に含むので、
+T を遅らせても空白が減るとは限らない（休日 7:45着17.5% → 8:00着27.5%）。
+早すぎる到着を「着ける」と数えると、始発で6時に着いて9時まで待つ人も
+「9時に着ける」ことになり、時間空白が見えなくなるため、この定義にしている。
 
 この向きで定義すると、拠点1つ・時間帯1つあたり逆方向ダイクストラ1回で
 全メッシュ分の判定が出る。全メッシュを起点に順方向探索する必要がない。
@@ -9,12 +14,34 @@
 メッシュ重心から最寄りバス停までの徒歩区間をネットワークに含める点が
 既存の到達圏計算との違い。バス停間の徒歩エッジ(300m)だけでは
 「そもそもバス停まで歩けるか」が評価されない。
+
+時間帯の値は、到着時刻を5分刻みにして判定した結果の平均とする（DayDiagnosis）。
+毎時00分の1点だけで測ると、数分の違いで便に間に合うかが変わり、結果が大きく
+揺れる。室蘭の休日では 7:00着 46.1% / 7:15着 28.2% / 7:30着 20.4% で、
+7:00着は7時台で最も悪い時刻だった。
 """
 
 import numpy as np
 import pandas as pd
 
 from population import haversine_matrix, mesh_level
+
+# 到着時刻の刻み（分）と、診断する時間帯（5時台〜22時台 ＝ 5:00〜22:55着）
+STEP_MIN = 5
+DAY_HOURS = tuple(range(5, 23))
+
+
+def arrival_times(hours=DAY_HOURS, step_min=STEP_MIN):
+    """各時間帯の到着時刻（秒）を刻み幅ごとに並べる。H時台 ＝ H:00〜H:55着（5分刻み）"""
+    if step_min <= 0 or 60 % step_min:
+        raise ValueError(f"刻み幅は60の約数（分）にしてください: {step_min}")
+    return np.array([h * 3600 + m * 60 for h in hours for m in range(0, 60, step_min)])
+
+
+def clock(sec):
+    """秒を 7:05 の形にする"""
+    sec = int(sec)
+    return f"{sec // 3600}:{(sec % 3600) // 60:02d}"
 
 
 def aggregate_to_500m(df):
@@ -28,6 +55,8 @@ def aggregate_to_500m(df):
     入力された場合はすでに表示に適した粒度なのでそのまま1セルとして扱う。
 
     人口は合計、空白判定は「そのセルの人口の過半が空白なら空白」とする。
+    時間帯の平均（DayDiagnosis.hour_mesh）のように blank_pop 列がすでにあれば、
+    メッシュの空白人口は「人口×着けなかった時刻の割合」なので、それをそのまま合計する。
     """
     code = df["meshcode"].astype(str)
     km = code.str[:8]
@@ -56,12 +85,18 @@ def aggregate_to_500m(df):
         cell_lat = base_lat + 0.5 / 120
         cell_lon = base_lon + 0.5 / 80
 
+    if "blank_pop" in df.columns:
+        blank_pop = df["blank_pop"].to_numpy(dtype=float)
+        blank_elderly = df["blank_elderly"].to_numpy(dtype=float)
+    else:
+        blank_pop = np.where(df["reachable"], 0.0, df["pop"])
+        blank_elderly = np.where(df["reachable"], 0.0, df["elderly"])
     work = df.assign(
         cell=cell_id,
         cell_lat=cell_lat,
         cell_lon=cell_lon,
-        blank_pop=np.where(df["reachable"], 0.0, df["pop"]),
-        blank_elderly=np.where(df["reachable"], 0.0, df["elderly"]),
+        blank_pop=blank_pop,
+        blank_elderly=blank_elderly,
     )
     agg = dict(
         lat=("cell_lat", "first"),
@@ -122,6 +157,16 @@ class BlankAreaAnalyzer:
         served = np.zeros(self.n_mesh, dtype=bool)
         served[self.pair_mesh] = True
         self.static_blank = ~served
+
+    def served_share(self):
+        """歩ける範囲にバス停がある人口の割合（0〜1）
+
+        人口と時刻表の地域がずれていないかの確認に使う。別の都市のGTFSに室蘭の人口が
+        残ったまま診断すると、全メッシュが静的空白になり、エラーも出ずに空白人口100%と
+        表示されていた。
+        """
+        total = float(self.pop._pop.sum())
+        return float(self.pop._pop[~self.static_blank].sum()) / total if total > 0 else 0.0
 
     def _walk_sec(self, speed_factor=1.0):
         """メッシュ→バス停の徒歩所要時間（秒）。speed_factorで減速を表現する"""
@@ -189,27 +234,130 @@ class BlankAreaAnalyzer:
             "static_blank_pop": round(float(df.loc[df["static_blank"], "pop"].sum())),
         }
 
+    def diagnose_day(self, dest_stop_ids, max_time_sec, hours=DAY_HOURS, step_min=STEP_MIN,
+                     speed_factor=1.0):
+        """到着時刻を刻み幅ごとに動かして診断する（時間帯の値はその平均）
+
+        1時刻あたり約10msなので、5〜22時台を5分刻み（216通り）にしても2秒台で済む。
+        """
+        times = arrival_times(hours, step_min)
+        earliest = times - max_time_sec
+        blank = np.empty((len(times), self.n_mesh), dtype=bool)
+        for i, t in enumerate(times):
+            mesh_dep = self.latest_departure_by_mesh(
+                dest_stop_ids, int(t), max_time_sec, speed_factor)
+            blank[i] = ~(mesh_dep >= earliest[i])
+        return DayDiagnosis(self, hours, step_min, times, blank)
+
     def blank_hours_by_mesh(self, dest_stop_ids, hours, max_time_sec, speed_factor=1.0):
-        """各メッシュが何時間帯で空白になるかを数える（色分けの「深刻度」用）
+        """各メッシュが1日のうち何時間、拠点に着けないか（色分けの「深刻度」用）
 
         終日空白の地域と、特定の時間帯だけ空白になる地域を区別するための指標。
         「同じ場所が時間帯で空白化する」という主張はこの差で示す。
+        以前は毎時00分に空白だった回数を数えていたが、00分の前後で便に
+        間に合うかが変わるだけで1時間ぶん増減したため、5分刻みの時間にした。
         """
-        counts = None
-        for h in hours:
-            df = self.diagnose(dest_stop_ids, h * 3600, max_time_sec, speed_factor)
-            blank = (~df["reachable"]).to_numpy().astype(int)
-            counts = blank if counts is None else counts + blank
-        return counts
+        return self.diagnose_day(dest_stop_ids, max_time_sec, hours,
+                                 speed_factor=speed_factor).blank_hours()
 
     def diagnose_by_hour(self, dest_stop_ids, hours, max_time_sec, speed_factor=1.0):
-        """時間帯別の空白人口。3Dカラム表示用のデータ源"""
-        rows = []
-        for h in hours:
-            df = self.diagnose(dest_stop_ids, h * 3600, max_time_sec, speed_factor)
-            s = self.summarize(df)
-            s["hour"] = h
-            rows.append(s)
-        return pd.DataFrame(rows)[
-            ["hour", "blank_pop", "blank_elderly", "blank_mesh", "static_blank_pop", "total_pop"]
-        ]
+        """時間帯別の空白人口（各時間帯の平均と、到着時刻による幅）"""
+        return self.diagnose_day(dest_stop_ids, max_time_sec, hours,
+                                 speed_factor=speed_factor).hourly()
+
+
+class DayDiagnosis:
+    """到着時刻を5分刻みにした診断結果
+
+    blank[i, m] が True なら、到着時刻 times[i] にメッシュ m の人は拠点に着けない。
+    時間帯（H時台）の空白人口は H:00〜H:55着の12通りの平均とする。
+    メッシュの空白人口は「人口×その時間帯で着けなかった時刻の割合」になり、
+    全メッシュを足すと時間帯の平均に一致する。
+    """
+
+    def __init__(self, analyzer, hours, step_min, times, blank):
+        self.hours = [int(h) for h in hours]
+        self.step_min = int(step_min)
+        self.per_hour = 60 // self.step_min
+        self.times = np.asarray(times)
+        self.blank = blank
+        pop = analyzer.pop
+        self.meshcode = pop.df["Meshcode"].astype(str).to_numpy()
+        self.lat, self.lon = pop._lat, pop._lon
+        self.pop, self.elderly = pop._pop, pop._eld
+        self.static_blank = analyzer.static_blank
+        # 到着時刻ごとの空白人口。行列積は環境によって足す順序が変わり端数が
+        # ずれうるので、行ごとに同じ順序で足す（施策の前後比較で、同じ判定なのに
+        # 端数の差を「変化した」と数えないため）。
+        self.blank_pop_t = np.array([self.pop[row].sum() for row in blank])
+        self.blank_elderly_t = np.array([self.elderly[row].sum() for row in blank])
+
+    def _rows(self, hour):
+        if hour not in self.hours:
+            raise ValueError(f"{hour}時台は計算していません（{self.hours[0]}〜{self.hours[-1]}時台）")
+        i = self.hours.index(hour) * self.per_hour
+        return slice(i, i + self.per_hour)
+
+    def hour_times(self, hour):
+        """その時間帯の到着時刻（秒）"""
+        return self.times[self._rows(hour)]
+
+    def hour_share(self, hour):
+        """メッシュごとに、その時間帯で着けなかった到着時刻の割合（0〜1）"""
+        return self.blank[self._rows(hour)].mean(axis=0)
+
+    def hour_mesh(self, hour):
+        """その時間帯のメッシュ別の結果（空白人口は時間帯の平均）"""
+        share = self.hour_share(hour)
+        return pd.DataFrame({
+            "meshcode": self.meshcode,
+            "lat": self.lat,
+            "lon": self.lon,
+            "pop": self.pop,
+            "elderly": self.elderly,
+            "blank_share": share,
+            "blank_pop": self.pop * share,
+            "blank_elderly": self.elderly * share,
+            # その時間帯のどの到着時刻でも着けるなら空白ではない
+            "reachable": share == 0,
+            "static_blank": self.static_blank,
+        })
+
+    def hour_summary(self, hour):
+        """その時間帯の空白人口（平均）と、到着時刻による幅"""
+        r = self._rows(hour)
+        bp, be, ts = self.blank_pop_t[r], self.blank_elderly_t[r], self.times[r]
+        return {
+            "hour": hour,
+            "blank_pop": round(float(bp.mean())),
+            "blank_elderly": round(float(be.mean())),
+            "blank_mesh": int((self.hour_share(hour) > 0).sum()),
+            "total_pop": round(float(self.pop.sum())),
+            "static_blank_pop": round(float(self.pop[self.static_blank].sum())),
+            "blank_pop_min": round(float(bp.min())),
+            "blank_pop_max": round(float(bp.max())),
+            "time_min": int(ts[bp.argmin()]),
+            "time_max": int(ts[bp.argmax()]),
+        }
+
+    def hourly(self):
+        """全時間帯の hour_summary を表にする"""
+        return pd.DataFrame([self.hour_summary(h) for h in self.hours])
+
+    def hourly_blank(self):
+        """時間帯ごとの (空白人口の平均, うち高齢者の平均)。端数は丸めない"""
+        shape = (len(self.hours), self.per_hour)
+        return (self.blank_pop_t.reshape(shape).mean(axis=1),
+                self.blank_elderly_t.reshape(shape).mean(axis=1))
+
+    def series(self):
+        """到着時刻ごと（5分刻み）の空白人口"""
+        return pd.DataFrame({
+            "time_sec": self.times,
+            "blank_pop": self.blank_pop_t,
+            "blank_elderly": self.blank_elderly_t,
+        })
+
+    def blank_hours(self):
+        """メッシュごとに、1日のうち拠点に着けない時間（時間）＝ 刻み幅 × 着けなかった回数"""
+        return self.blank.sum(axis=0) * self.step_min / 60.0
